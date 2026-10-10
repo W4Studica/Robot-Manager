@@ -14,6 +14,17 @@ VMX-pi에서 상시 실행되는 서비스. roboRIO의 로봇 프로그램 기�
   (예: `HALSIMVMX_DIO_MAP`). OS/커널별로 핀 번호가 달라질 수 있다는 정황이 있어 이 계층에서 흡수한다(아래 참고).
 - **VMX를 직접 열지 않는다.** VMX(pigpio)는 로봇 프로그램이 연다. MockDS도 이 서비스의 역할이 아니다(사용자 코드).
 
+## GPIO 인터럽트 shim (`gpio_isr_shim/`)
+
+sysfs GPIO가 없는 커널(예: Ubuntu 26.04 / 커널 7.0)에서 VMX HAL이 `RPI GPIO Interrupt Enable:  PI_BAD_ISR_INIT.`를 내는 문제를 고치는 `LD_PRELOAD` 라이브러리다.
+`install.sh`가 빌드해서 `/opt/robot_manager/lib/libvmx_gpio_isr_shim.so`에 설치하고, 로봇 프로그램의 환경에는 `config.json`의 `env`로 준다:
+
+```json
+{ "env": { "LD_PRELOAD": "/opt/robot_manager/lib/libvmx_gpio_isr_shim.so" } }
+```
+
+자세한 내용과 한계는 [gpio_isr_shim/README.md](gpio_isr_shim/README.md). **PC에서 콜백 규약만 테스트했고 실기기 검증 전이다.**
+
 ## deploy와의 관계
 
 deploy는 **GradleRIO가 SSH로 직접** 한다(2027과 동일). `robot_manager`는 deploy에 관여하지 않고 결과물만 실행한다.
