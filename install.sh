@@ -36,6 +36,7 @@ SERVICE=robot_manager
 DRY_RUN=0
 WITH_SUDOERS=0
 SKIP_DRIVERS=0
+UPGRADE_DRIVERS=0
 SKIP_PLUGIN=0
 ROBOT_HOME=""
 LOGIN_USER=""
@@ -54,6 +55,7 @@ Options:
   --allwpilib-dir DIR      allwpilib checkout (default: ../allwpilib next to this repo)
   --sudoers                allow the login user passwordless sudo for: systemctl (robot_manager), ldconfig, sync
   --skip-drivers           do not build/install studica_drivers
+  --upgrade-drivers        replace an already installed studica_drivers (e.g. from the vmx-hal package) with this repo's copy
   --skip-plugin            do not build the Studica backend plugin
   --dry-run                print what would be done, change nothing
   -h, --help               this text
@@ -75,6 +77,7 @@ while [ $# -gt 0 ]; do
     --allwpilib-dir) [ $# -ge 2 ] || die "--allwpilib-dir needs a value"; AW_DIR="$2"; shift ;;
     --sudoers) WITH_SUDOERS=1 ;;
     --skip-drivers) SKIP_DRIVERS=1 ;;
+    --upgrade-drivers) UPGRADE_DRIVERS=1 ;;
     --skip-plugin) SKIP_PLUGIN=1 ;;
     --dry-run) DRY_RUN=1 ;;
     -h|--help) usage; exit 0 ;;
@@ -153,6 +156,13 @@ install_drivers() {
   info "studica_drivers"
   if [ "$SKIP_DRIVERS" = 1 ]; then echo "  skipped (--skip-drivers)"; return; fi
   have_vmx || { warn "VMXPi.h / vmxpi_hal_cpp not found under /usr/local; skipping studica_drivers"; return; }
+  # The vmx-hal package already ships (an older) libstudica_drivers. Do not overwrite files a package owns
+  # unless asked. The halsim_vmx plugin compiles the driver sources itself, so it does not need this library.
+  if [ -f /usr/local/lib/studica_drivers/libstudica_drivers.so ] && [ "$UPGRADE_DRIVERS" != 1 ]; then
+    echo "  already installed (probably by the vmx-hal package); not replacing it."
+    echo "  pass --upgrade-drivers to install this repo's newer copy over it (replaces package-owned files)."
+    return
+  fi
   if ! command -v g++ >/dev/null 2>&1 || ! command -v make >/dev/null 2>&1; then
     warn "g++ and make are required; skipping studica_drivers (sudo apt install -y g++ make)"; return
   fi
