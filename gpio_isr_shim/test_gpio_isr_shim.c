@@ -307,6 +307,7 @@ static void test_missing_real_library_is_not_fatal(void) {
 
 int main(void) {
   setenv("VMX_GPIO_SHIM_FORCE", "1", 1); /* do not depend on /sys/class/gpio of the test machine */
+  setenv("VMX_GPIO_SHIM_QUIET", "1", 1); /* the tests have no real HAL; do not print the "not found" warning */
   shim_test_set_backend((backend_t){fake_request, fake_read_event});
 
   test_rising_and_falling();

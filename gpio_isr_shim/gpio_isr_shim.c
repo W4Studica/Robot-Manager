@@ -358,8 +358,9 @@ SHIM_EXPORT void gpioTerminate(void) {
   void (*real)(void) = (void (*)(void))find_real("gpioTerminate");
   if (real) {
     real();
-  } else {
-    /* Without the real gpioTerminate pigpio's threads keep running and exit() can hang. Say so. */
+  } else if (getenv("VMX_GPIO_SHIM_QUIET") == NULL) {
+    /* Without the real gpioTerminate pigpio's threads keep running and exit() can hang. Say so
+     * (VMX_GPIO_SHIM_QUIET silences this; the tests have no HAL on purpose). */
     fputs("gpio_isr_shim: WARNING: could not find the real gpioTerminate; pigpio will not be shut down\n",
           stderr);
   }
