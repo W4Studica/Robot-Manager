@@ -48,9 +48,19 @@ ThreadSanitizer(0건), AddressSanitizer, UBSan으로도 통과시켰다(TSan이 
 sudo env VMX_GPIO_SHIM_DEBUG=1 LD_PRELOAD=/opt/robot_manager/lib/libvmx_gpio_isr_shim.so ./vmx_n 1
 ```
 
-## 알려진 한계 (실기기 검증 전)
+## 로봇에서 확인한 것 (2026-10-10, Ubuntu 26.04 / 커널 7.0 / Pi 4)
 
-- **PC에서는 콜백 규약만 검증했다.** 실제 `/dev/gpiochip0`로 에지가 오는지는 로봇에서 확인해야 한다.
+`sudo env VMX_GPIO_SHIM_DEBUG=1 LD_PRELOAD=... ./vmx_n 1` 결과:
+
+- `RPI GPIO Interrupt Enable:  PI_BAD_ISR_INIT.` 3줄이 **사라졌다.**
+- HAL이 요청한 인터럽트: **GPIO 13, 6, 12, 모두 `edge=1`(하강), `timeout=0`.**
+- 요청이 전부 성공했고(`cannot request` 없음), GPIO 12에서 **하강 에지가 약 20 ms 간격(50 Hz)으로 계속 도착**한다. `VMXPi(true, 50)`의 50 Hz와 일치하므로 VMX 보드의 "데이터 준비됨" 신호로 보인다.
+- 보드 통신(`Established communication with VMX board ...`), navX 인식, `IsOpen: 1`은 그대로.
+- 아직 확인 못 한 것: 종료까지의 전체 출력(`Write CRC Mismatches`, 정상 종료), GPIO 6/13에서 에지가 오는지, 이 인터럽트가 HAL의 어떤 기능에 쓰이는지.
+
+## 알려진 한계
+
+- PC에서는 콜백 규약만 검증했고, 실제 에지 도착은 위처럼 로봇에서 확인했다(위의 "아직 확인 못 한 것" 제외).
 - 커널에 줄을 요청하면 그 핀이 GPIO 입력으로 잡힌다. HAL이 같은 핀을 다른 용도로 쓰면 충돌(`EBUSY`)하거나 핀 기능이 바뀔 수 있다.
   충돌하면 `PI_BAD_ISR_INIT`이 그대로 나오므로(전과 같음) 나빠지지는 않는다. `VMX_GPIO_SHIM_DEBUG=1`로 원인(errno)을 볼 수 있다.
 - HAL이 인터럽트로 무엇을 하는지(어떤 기능이 이 인터럽트에 의존하는지)는 아직 모른다. HAL의 `comm ready` 핸드셰이크는 이미 문자 장치로 동작한다(SPI 통신은 정상).
