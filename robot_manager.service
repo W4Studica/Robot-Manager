@@ -1,0 +1,17 @@
+[Unit]
+Description=Studica VMX robot_manager (runs robotCommand as root)
+After=network.target
+
+[Service]
+Type=simple
+# root: the VMX HAL (pigpio) needs /dev/mem
+User=root
+ExecStart=/usr/bin/python3 /opt/robot_manager/robot_manager.py --config /etc/robot_manager/config.json
+Restart=always
+RestartSec=2
+# stop the whole robot process tree, not only the main process
+KillMode=control-group
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

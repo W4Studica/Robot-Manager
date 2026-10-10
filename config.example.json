@@ -1,0 +1,11 @@
+{
+  "robot_home": "/home/CHANGE_ME",
+  "env": {},
+  "profiles": [
+    {
+      "name": "example (values are NOT verified, replace after testing on the VMX)",
+      "kernel_regex": "^0\\.0\\.0$",
+      "env": {}
+    }
+  ]
+}
