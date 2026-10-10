@@ -135,12 +135,40 @@ static backend_t g_backend = {chardev_request, chardev_read_event};
 
 /* ---------------------------------------------------------------- helpers */
 
+/*
+ * Finds the original pigpio function `name`.
+ *
+ * dlsym(RTLD_NEXT) only searches the global scope after this library. That fails when the
+ * HAL library was loaded with dlopen(RTLD_LOCAL), as halsim_vmx's Studica plugin does: the HAL
+ * (and its pigpio) then lives in the plugin's local scope and RTLD_NEXT returns NULL. Then
+ * gpioTerminate() was never forwarded, pigpio's threads kept running and the process hung in exit().
+ * So fall back to asking for the already loaded HAL library by name (RTLD_NOLOAD never loads anything).
+ * VMX_GPIO_SHIM_REAL_LIB overrides the library name.
+ */
+static void *find_real(const char *name) {
+  void *p = dlsym(RTLD_NEXT, name);
+  if (p != NULL) {
+    return p;
+  }
+  const char *lib = getenv("VMX_GPIO_SHIM_REAL_LIB");
+  if (lib == NULL || *lib == '\0') {
+    lib = "libvmxpi_hal_cpp.so";
+  }
+  void *handle = dlopen(lib, RTLD_LAZY | RTLD_NOLOAD);
+  if (handle != NULL) {
+    p = dlsym(handle, name);
+    dlclose(handle); /* the library stays loaded; this only drops our extra reference */
+  }
+  DEBUG("find_real(%s) via %s: %s", name, lib, p ? "found" : "NOT FOUND");
+  return p;
+}
+
 static uint32_t shim_tick(void) {
+  /* Cache only a success: the HAL may be loaded after the first lookup, and a failed lookup must not
+   * stick forever. A miss falls back to the monotonic clock below. */
   static uint32_t (*real_tick)(void);
-  static bool looked_up;
-  if (!looked_up) {
-    real_tick = (uint32_t(*)(void))dlsym(RTLD_NEXT, "gpioTick");
-    looked_up = true;
+  if (real_tick == NULL) {
+    real_tick = (uint32_t(*)(void))find_real("gpioTick");
   }
   if (real_tick) {
     return real_tick();
@@ -308,7 +336,7 @@ __attribute__((constructor)) static void shim_init(void) {
 SHIM_EXPORT int gpioSetISRFunc(unsigned gpio, unsigned edge, int timeout, isr_func_t f) {
   if (!use_shim()) {
     int (*real)(unsigned, unsigned, int, isr_func_t) =
-        (int (*)(unsigned, unsigned, int, isr_func_t))dlsym(RTLD_NEXT, "gpioSetISRFunc");
+        (int (*)(unsigned, unsigned, int, isr_func_t))find_real("gpioSetISRFunc");
     return real ? real(gpio, edge, timeout, f) : PI_BAD_ISR_INIT;
   }
   return set_isr(gpio, edge, timeout, f, NULL, NULL);
@@ -318,7 +346,7 @@ SHIM_EXPORT int gpioSetISRFuncEx(unsigned gpio, unsigned edge, int timeout, isr_
                                  void *userdata) {
   if (!use_shim()) {
     int (*real)(unsigned, unsigned, int, isr_func_ex_t, void *) =
-        (int (*)(unsigned, unsigned, int, isr_func_ex_t, void *))dlsym(RTLD_NEXT, "gpioSetISRFuncEx");
+        (int (*)(unsigned, unsigned, int, isr_func_ex_t, void *))find_real("gpioSetISRFuncEx");
     return real ? real(gpio, edge, timeout, f, userdata) : PI_BAD_ISR_INIT;
   }
   return set_isr(gpio, edge, timeout, NULL, f, userdata);
@@ -327,9 +355,13 @@ SHIM_EXPORT int gpioSetISRFuncEx(unsigned gpio, unsigned edge, int timeout, isr_
 /* Stop our ISR threads before pigpio tears itself down, so no callback runs into freed state. */
 SHIM_EXPORT void gpioTerminate(void) {
   stop_all();
-  void (*real)(void) = (void (*)(void))dlsym(RTLD_NEXT, "gpioTerminate");
+  void (*real)(void) = (void (*)(void))find_real("gpioTerminate");
   if (real) {
     real();
+  } else {
+    /* Without the real gpioTerminate pigpio's threads keep running and exit() can hang. Say so. */
+    fputs("gpio_isr_shim: WARNING: could not find the real gpioTerminate; pigpio will not be shut down\n",
+          stderr);
   }
 }
 

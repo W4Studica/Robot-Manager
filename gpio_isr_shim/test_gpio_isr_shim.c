@@ -261,6 +261,50 @@ static void test_cancel_from_inside_the_callback(void) {
   shim_test_stop_all();
 }
 
+/* The HAL is loaded with dlopen(RTLD_LOCAL), like halsim_vmx's Studica plugin does. dlsym(RTLD_NEXT)
+ * cannot see it; the shim must still forward gpioTerminate() and gpioTick() to it. */
+static void test_forwards_to_a_locally_loaded_hal(void) {
+  begin();
+  const char *name = "./libfake_hal.so";
+  void *hal = dlopen(name, RTLD_NOW | RTLD_LOCAL);
+  CHECK(hal != NULL);
+  if (hal == NULL) {
+    fprintf(stderr, "dlopen: %s\n", dlerror());
+    return;
+  }
+  int (*calls)(void) = (int (*)(void))dlsym(hal, "fake_hal_terminate_calls");
+  CHECK(calls != NULL);
+  CHECK(dlsym(RTLD_NEXT, "gpioTerminate") == NULL); /* precondition: RTLD_NEXT really cannot see it */
+
+  setenv("VMX_GPIO_SHIM_REAL_LIB", name, 1);
+  CHECK(gpioSetISRFunc(14, SHIM_EDGE_EITHER, 0, cb) == 0);
+  int before = calls();
+  gpioTerminate();
+  CHECK(calls() == before + 1);     /* the real gpioTerminate ran */
+  signal(SIGPIPE, SIG_IGN);         /* the read end is closed now, so this write is expected to fail */
+  (void)!write(g_pipe_w[14], "1", 1);
+  usleep(100 * 1000);
+  CHECK(events() == 0);             /* and our ISR threads were stopped first */
+
+  /* gpioTick() also comes from the HAL: the callback tick must be its value. */
+  CHECK(gpioSetISRFunc(15, SHIM_EDGE_EITHER, 0, cb) == 0);
+  edge(15, 1);
+  CHECK(wait_events(1, 2000));
+  CHECK(g_ev.tick[0] == 424242u);
+  shim_test_stop_all();
+
+  unsetenv("VMX_GPIO_SHIM_REAL_LIB");
+  dlclose(hal);
+}
+
+static void test_missing_real_library_is_not_fatal(void) {
+  begin();
+  setenv("VMX_GPIO_SHIM_REAL_LIB", "libdoes_not_exist_anywhere.so", 1);
+  gpioTerminate(); /* prints a warning, must not crash */
+  unsetenv("VMX_GPIO_SHIM_REAL_LIB");
+  CHECK(1);
+}
+
 int main(void) {
   setenv("VMX_GPIO_SHIM_FORCE", "1", 1); /* do not depend on /sys/class/gpio of the test machine */
   shim_test_set_backend((backend_t){fake_request, fake_read_event});
@@ -278,6 +322,8 @@ int main(void) {
   test_terminate_stops_everything();
   test_burst_of_events_is_not_lost();
   test_cancel_from_inside_the_callback();
+  test_forwards_to_a_locally_loaded_hal();
+  test_missing_real_library_is_not_fatal();
 
   if (g_fail) {
     fprintf(stderr, "%d check(s) failed\n", g_fail);

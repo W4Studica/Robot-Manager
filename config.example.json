@@ -1,5 +1,6 @@
 {
   "robot_home": "/home/CHANGE_ME",
+  "stop_grace_seconds": 5,
   "env": {},
   "profiles": [
     {

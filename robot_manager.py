@@ -26,6 +26,17 @@ DEFAULT_CONFIG = "/etc/robot_manager/config.json"
 ROBOT_COMMAND_FILE = "robotCommand"
 
 
+DEFAULT_STOP_GRACE = 5.0
+
+
+def stop_grace_from_config(config):
+    """Seconds to wait after SIGTERM before SIGKILL. 'stop_grace_seconds' in the config, default 5."""
+    value = config.get("stop_grace_seconds", DEFAULT_STOP_GRACE)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        raise ValueError("config: 'stop_grace_seconds' must be a positive number, got %r" % (value,))
+    return float(value)
+
+
 def load_config(path):
     with open(path, "r", encoding="utf-8") as f:
         config = json.load(f)
@@ -100,6 +111,8 @@ class Manager:
             uptime = time.monotonic() - self._started_at
             with self._lock:
                 self._proc = None
+            if not self._stop.is_set():  # while stopping, stop() cleans the group itself
+                self._reap_group(started.pid, "robot program exited", send_term=True)
             if self._stop.is_set():
                 break
             log.warning("robot program exited with code %s after %.1fs", code, uptime)
@@ -133,14 +146,66 @@ class Manager:
             proc = self._proc
         if proc is None or proc.poll() is not None:
             return
-        log.info("stopping robot program (pid %d)", proc.pid)
+        started = time.monotonic()
+        log.info("stopping robot program (pid %d), SIGTERM then SIGKILL after %.0fs", proc.pid, self.stop_grace)
         _signal_group(proc, signal.SIGTERM)
+        killed = False
         try:
             proc.wait(self.stop_grace)
         except subprocess.TimeoutExpired:
-            log.warning("robot program did not stop in %.0fs; killing", self.stop_grace)
+            killed = True
+            log.warning("robot program did not stop within %.0fs; sending SIGKILL (its cleanup, such as "
+                        "gpioTerminate, did not run)", self.stop_grace)
             _signal_group(proc, signal.SIGKILL)
             proc.wait()
+        # SIGTERM already went to the whole group; give the rest of the group what is left of the grace period.
+        self._reap_group(proc.pid, "robot program stopped", send_term=False, deadline=started + self.stop_grace)
+        log.info("robot program %s after %.1fs", "killed" if killed else "stopped",
+                 time.monotonic() - started)
+
+    def _reap_group(self, pgid, why, send_term, deadline=None):
+        """The leader is gone. Make sure nothing of its process group is left behind.
+
+        Members get until `deadline` (default: one grace period from now) to leave, then SIGKILL. With
+        send_term the members are asked to stop first (the program exited on its own, so nobody has told
+        them); without it SIGTERM already went out (stop()) and this only waits.
+        """
+        if not _group_alive(pgid):
+            return
+        if send_term:
+            log.warning("%s but processes of its group are still running; sending SIGTERM to the group", why)
+            _killpg(pgid, signal.SIGTERM)
+        if deadline is None:
+            deadline = time.monotonic() + self.stop_grace
+        while _group_alive(pgid) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        if not _group_alive(pgid):
+            return
+        log.warning("processes of the robot program's group are still running after %.0fs; sending SIGKILL "
+                    "to the group", self.stop_grace)
+        _killpg(pgid, signal.SIGKILL)
+        kill_deadline = time.monotonic() + 2.0
+        while _group_alive(pgid) and time.monotonic() < kill_deadline:
+            time.sleep(0.02)
+        if _group_alive(pgid):
+            log.error("processes of group %d survived SIGKILL", pgid)
+
+
+def _killpg(pgid, sig):
+    try:
+        os.killpg(pgid, sig)
+    except ProcessLookupError:
+        pass
+
+
+def _group_alive(pgid):
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def _signal_group(proc, sig):
@@ -161,7 +226,7 @@ def main(argv=None):
     env = build_environment(config, platform.release())
     command_file = config.get("robot_command") or os.path.join(config["robot_home"], ROBOT_COMMAND_FILE)
 
-    manager = Manager(command_file, config["robot_home"], env)
+    manager = Manager(command_file, config["robot_home"], env, stop_grace=stop_grace_from_config(config))
 
     def shutdown(signum, frame):
         log.info("received signal %d", signum)

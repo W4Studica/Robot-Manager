@@ -59,6 +59,14 @@ sudo env VMX_GPIO_SHIM_DEBUG=1 LD_PRELOAD=/opt/robot_manager/lib/libvmx_gpio_isr
 - **끝까지 실행(디버그 로그 없이):** 정상 종료(`VMX HAL:  pigpio library closed.`, 종료 코드 0). 쓰기 19회에 `Write CRC Mismatches: 0`/`Write Failures: 0`, 읽기 9051회에 실패 0. `gpioTerminate`를 가로채서 ISR 스레드를 먼저 멈추는 것도 문제없이 동작했다.
 - 아직 확인 못 한 것: GPIO 6/13에서 에지가 오는지(이 실행에서는 12만 도착), 이 인터럽트가 HAL의 어떤 기능에 쓰이는지, shim 유무에 따른 동작 차이(이전에도 통신은 정상이었다).
 
+## 로봇에서 발견한 버그와 수정 (2026-10-10)
+
+처음 버전은 `gpioTerminate`에서 `dlsym(RTLD_NEXT, ...)`로 원래 함수를 찾았다. Studica 플러그인이 HAL을 `dlopen(RTLD_LOCAL)`로 불러오면 HAL(과 그 안의 pigpio)은 전역 검색 범위 밖에 있어서
+`RTLD_NEXT`가 `NULL`을 돌려주고, **진짜 `gpioTerminate`가 호출되지 않았다.** pigpio의 스레드(`pthAlertThread`, `pthFifoThread`, `pthSocketThread`)가 계속 살아 있었고,
+그중 FIFO 스레드가 `fgets`에서 stdio 락을 잡은 채 대기해서 `exit()`의 `_IO_flush_all`이 영원히 멈췄다(`gdb`의 `thread apply all bt`로 확인). HAL을 직접 링크한 프로그램(`vmx_n`)은 전역 범위라 문제가 없었다.
+수정: `RTLD_NEXT`가 실패하면 이미 로드된 HAL 라이브러리를 이름으로 찾는다(`dlopen(..., RTLD_NOLOAD)`, 이름은 `VMX_GPIO_SHIM_REAL_LIB`, 기본 `libvmxpi_hal_cpp.so`).
+또 `gpioTick` 탐색의 실패를 영구 캐시하던 것도 고쳤다(성공만 캐시). 테스트가 이 상황(가짜 HAL을 `dlopen(RTLD_LOCAL)`로 로드)을 재현한다. 원래 함수를 끝내 못 찾으면 stderr에 경고를 낸다.
+
 ## 알려진 한계
 
 - PC에서는 콜백 규약만 검증했고, 실제 에지 도착은 위처럼 로봇에서 확인했다(위의 "아직 확인 못 한 것" 제외).

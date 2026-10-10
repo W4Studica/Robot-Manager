@@ -146,6 +146,71 @@ class ManagerTest(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 8)
 
 
+class StopSequenceTest(ManagerTest):
+    def test_a_child_that_ignores_sigterm_is_killed_when_the_leader_exits(self):
+        # The leader exits on SIGTERM but leaves a child that ignores it. The leader being gone must not
+        # make robot_manager think everything stopped.
+        pidfile = os.path.join(self.home, "stubborn.pid")
+        write_script(
+            self.command,
+            f"sh -c 'trap \"\" TERM; sleep 60' &\n"
+            f"echo $! > \"{pidfile}\"\n"
+            "trap 'exit 0' TERM\n"
+            "while true; do sleep 1; done\n",
+        )
+        manager, thread = self.start(stop_grace=3.0)
+        self.assertTrue(wait_for(lambda: os.path.exists(pidfile) and read(pidfile).strip()))
+        stubborn = int(read(pidfile).strip())
+        self.assertTrue(_alive(stubborn))
+        self.finish(manager, thread)
+        self.assertTrue(wait_for(lambda: not _alive(stubborn), timeout=5), "the stubborn child survived stop()")
+
+    def test_a_leftover_child_is_cleaned_when_the_program_exits_on_its_own(self):
+        pidfile = os.path.join(self.home, "orphan.pid")
+        # The program starts a background child and exits at once; the child must not be left behind.
+        write_script(self.command, f'sleep 60 &\necho $! > "{pidfile}"\nexit 0\n')
+        manager, thread = self.start(min_uptime=0.0, backoff_initial=5.0, backoff_max=5.0)
+        self.assertTrue(wait_for(lambda: os.path.exists(pidfile) and read(pidfile).strip()))
+        orphan = int(read(pidfile).strip())
+        self.assertTrue(wait_for(lambda: not _alive(orphan), timeout=5), "the orphaned child was not cleaned")
+        self.finish(manager, thread)
+
+    def test_stop_reports_a_clean_stop(self):
+        write_script(self.command, "sleep 60\n")
+        manager, thread = self.start()
+        self.assertTrue(wait_for(lambda: manager.starts >= 1))
+        with self.assertLogs("robot_manager", level="INFO") as logs:
+            self.finish(manager, thread)
+        text = "\n".join(logs.output)
+        self.assertIn("robot program stopped after", text)
+        self.assertNotIn("sending SIGKILL", text)
+
+    def test_stop_reports_when_sigkill_was_needed(self):
+        ready = os.path.join(self.home, "ready")
+        write_script(self.command, f'trap "" TERM; touch "{ready}"; while true; do sleep 1; done\n')
+        manager, thread = self.start(stop_grace=0.5)
+        self.assertTrue(wait_for(lambda: os.path.exists(ready)))
+        with self.assertLogs("robot_manager", level="INFO") as logs:
+            self.finish(manager, thread)
+        text = "\n".join(logs.output)
+        self.assertIn("sending SIGKILL", text)
+        self.assertIn("robot program killed after", text)
+
+
+class StopGraceConfigTest(unittest.TestCase):
+    def test_default(self):
+        self.assertEqual(rm.stop_grace_from_config({"robot_home": "/x"}), 5.0)
+
+    def test_configured_value(self):
+        self.assertEqual(rm.stop_grace_from_config({"stop_grace_seconds": 12}), 12.0)
+        self.assertEqual(rm.stop_grace_from_config({"stop_grace_seconds": 2.5}), 2.5)
+
+    def test_invalid_values_are_rejected(self):
+        for bad in (0, -1, "5", None, True):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                rm.stop_grace_from_config({"stop_grace_seconds": bad})
+
+
 class CommandLineTest(unittest.TestCase):
     def test_sigterm_stops_the_service_and_its_program(self):
         import signal
