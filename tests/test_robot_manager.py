@@ -234,6 +234,41 @@ class CommandLineTest(unittest.TestCase):
                 if proc.poll() is None:
                     proc.kill()
 
+    def test_the_service_finishes_stopping_the_program_before_it_exits(self):
+        # The leader exits on SIGTERM but leaves a child that ignores it. The service must not exit until
+        # that child is gone (grace period, then SIGKILL): systemd would otherwise have to clean up after it.
+        import signal
+        import subprocess
+        with tempfile.TemporaryDirectory() as d:
+            pidfile = os.path.join(d, "stubborn.pid")
+            write_script(
+                os.path.join(d, "robotCommand"),
+                f"sh -c 'trap \"\" TERM; sleep 60' &\n"
+                f"echo $! > \"{pidfile}\"\n"
+                "trap 'exit 0' TERM\n"
+                "while true; do sleep 1; done\n",
+            )
+            cfg = os.path.join(d, "config.json")
+            with open(cfg, "w") as f:
+                json.dump({"robot_home": d, "stop_grace_seconds": 1}, f)
+            script = os.path.join(os.path.dirname(__file__), "..", "robot_manager.py")
+            proc = subprocess.Popen([sys.executable, script, "--config", cfg],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            stubborn = None
+            try:
+                self.assertTrue(wait_for(lambda: os.path.exists(pidfile) and read(pidfile).strip()))
+                stubborn = int(read(pidfile).strip())
+                self.assertTrue(_alive(stubborn))
+                proc.send_signal(signal.SIGTERM)
+                self.assertEqual(proc.wait(15), 0)
+                # The service has exited. The child must already be dead, not left for someone else to kill.
+                self.assertFalse(_alive(stubborn), "the service exited while the program's child was still running")
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                if stubborn is not None and _alive(stubborn):
+                    os.kill(stubborn, signal.SIGKILL)
+
     def test_missing_config_is_an_error(self):
         import subprocess
         script = os.path.join(os.path.dirname(__file__), "..", "robot_manager.py")

@@ -228,17 +228,25 @@ def main(argv=None):
 
     manager = Manager(command_file, config["robot_home"], env, stop_grace=stop_grace_from_config(config))
 
+    stop_threads = []
+
     def shutdown(signum, frame):
         log.info("received signal %d", signum)
         # Not manager.stop() directly: this handler runs on the main thread, which is inside
         # Popen.wait() holding its lock, so waiting on the child again here would deadlock.
-        threading.Thread(target=manager.stop, daemon=True).start()
+        # The thread is not a daemon and main() joins it below: run() returns as soon as the leader
+        # is gone, and exiting then would cut stop() off before it cleaned up the process group.
+        thread = threading.Thread(target=manager.stop)
+        stop_threads.append(thread)
+        thread.start()
 
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
 
     log.info("robot_manager starting; command: %s", command_file)
     manager.run()
+    for thread in list(stop_threads):
+        thread.join()
     log.info("robot_manager stopped")
     return 0
 
