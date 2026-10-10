@@ -44,6 +44,23 @@ deploy는 **GradleRIO가 SSH로 직접** 한다(2027과 동일). `robot_manager`
 
 ## 설치 (VMX-pi)
 
+### 스크립트로 (`install.sh`)
+
+로봇에서 이 레포와 `W4Studica/allwpilib`를 나란히 clone한 뒤 실행한다. ssh/비밀번호는 다루지 않는다(`sudo`가 직접 물어봄).
+
+```bash
+git clone https://github.com/W4Studica/Robot-Manager.git
+git clone https://github.com/W4Studica/allwpilib.git
+cd Robot-Manager
+./install.sh --dry-run --user <deploy할 사용자>      # 먼저 무엇을 할지 확인
+sudo ./install.sh --user <deploy할 사용자> --sudoers
+```
+
+`robot_manager` 설치, `studica_drivers` 빌드/설치, `libhalsim_vmx_studica.so` 빌드(`/opt/halsim_vmx/`), 선택적으로 passwordless sudo(`--sudoers`)를 한다.
+필요한 것(VMXPi.h, g++ 등)이 없으면 그 단계만 건너뛴다. 옵션은 `./install.sh --help`. **실기기 미검증.**
+
+### 수동으로
+
 ```bash
 sudo mkdir -p /opt/robot_manager /etc/robot_manager
 sudo cp robot_manager.py /opt/robot_manager/
