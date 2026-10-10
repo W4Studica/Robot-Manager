@@ -56,7 +56,8 @@ sudo env VMX_GPIO_SHIM_DEBUG=1 LD_PRELOAD=/opt/robot_manager/lib/libvmx_gpio_isr
 - HAL이 요청한 인터럽트: **GPIO 13, 6, 12, 모두 `edge=1`(하강), `timeout=0`.**
 - 요청이 전부 성공했고(`cannot request` 없음), GPIO 12에서 **하강 에지가 약 20 ms 간격(50 Hz)으로 계속 도착**한다. `VMXPi(true, 50)`의 50 Hz와 일치하므로 VMX 보드의 "데이터 준비됨" 신호로 보인다.
 - 보드 통신(`Established communication with VMX board ...`), navX 인식, `IsOpen: 1`은 그대로.
-- 아직 확인 못 한 것: 종료까지의 전체 출력(`Write CRC Mismatches`, 정상 종료), GPIO 6/13에서 에지가 오는지, 이 인터럽트가 HAL의 어떤 기능에 쓰이는지.
+- **끝까지 실행(디버그 로그 없이):** 정상 종료(`VMX HAL:  pigpio library closed.`, 종료 코드 0). 쓰기 19회에 `Write CRC Mismatches: 0`/`Write Failures: 0`, 읽기 9051회에 실패 0. `gpioTerminate`를 가로채서 ISR 스레드를 먼저 멈추는 것도 문제없이 동작했다.
+- 아직 확인 못 한 것: GPIO 6/13에서 에지가 오는지(이 실행에서는 12만 도착), 이 인터럽트가 HAL의 어떤 기능에 쓰이는지, shim 유무에 따른 동작 차이(이전에도 통신은 정상이었다).
 
 ## 알려진 한계
 
