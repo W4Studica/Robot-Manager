@@ -151,7 +151,7 @@ install_drivers() {
   if [ "$SKIP_DRIVERS" = 1 ]; then echo "  skipped (--skip-drivers)"; return; fi
   have_vmx || { warn "VMXPi.h / vmxpi_hal_cpp not found under /usr/local; skipping studica_drivers"; return; }
   if ! command -v g++ >/dev/null 2>&1 || ! command -v make >/dev/null 2>&1; then
-    warn "g++ and make are required; skipping studica_drivers"; return
+    warn "g++ and make are required; skipping studica_drivers (sudo apt install -y g++ make)"; return
   fi
   [ -d "$AW_DIR/studica_drivers" ] || { warn "$AW_DIR/studica_drivers not found (use --allwpilib-dir); skipping studica_drivers"; return; }
 
@@ -167,7 +167,7 @@ install_plugin() {
   info "Studica backend plugin for halsim_vmx"
   if [ "$SKIP_PLUGIN" = 1 ]; then echo "  skipped (--skip-plugin)"; return; fi
   have_vmx || { warn "VMXPi.h / vmxpi_hal_cpp not found under /usr/local; skipping the plugin"; return; }
-  command -v g++ >/dev/null 2>&1 || { warn "g++ is required; skipping the plugin"; return; }
+  command -v g++ >/dev/null 2>&1 || { warn "g++ is required; skipping the plugin (sudo apt install -y g++ make)"; return; }
   local major; major="$(gpp_major)"
   if [ -z "$major" ] || [ "$major" -lt 11 ]; then
     warn "g++ >= 11 (C++20) is required, found '${major:-none}'; skipping the plugin"; return
