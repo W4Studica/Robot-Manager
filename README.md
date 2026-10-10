@@ -9,11 +9,12 @@ VMX-pi에서 상시 실행되는 서비스. roboRIO의 로봇 프로그램 기�
   (명령어가 한 줄 들어 있는 파일. `sh`로 실행하므로 shebang이 필요 없음). `frcUserProgram` 같은 고정 프로그램 이름은 요구하지 않는다.
 - 아직 deploy가 안 돼서 `robotCommand`가 없으면 로그를 한 번 남기고 파일이 생길 때까지 기다린다.
 - 크래시 반복 시 1초부터 최대 10초까지 간격을 늘려서 재시작한다. 10초 이상 돌았던 프로그램은 빠르게 다시 시작한다.
-- **종료 순서**(`SIGTERM`/`SIGINT` 또는 서비스 stop): 로봇 프로그램의 **프로세스 그룹 전체**에 `SIGTERM` -> `stop_grace_seconds`(기본 5초) 동안 대기 -> 안 죽으면 그룹에 `SIGKILL`.
-  리더 프로세스가 끝난 뒤에도 그룹에 남은 프로세스(예: `SIGTERM`을 무시하는 자식)는 **남은 유예 시간까지 기다린 뒤** `SIGKILL`로 정리한다.
-  프로그램이 스스로 끝났는데(크래시 등) 자식이 남아 있으면 그 자식에게 먼저 `SIGTERM`, 유예 후 `SIGKILL`.
-  종료할 때마다 `robot program stopped after 0.4s` / `robot program killed after 5.0s`를 로그에 남기고, `SIGKILL`이 필요했다면 경고한다
-  (이 경우 프로그램의 정리 코드, 예를 들면 pigpio의 `gpioTerminate`가 돌지 않았다는 뜻이다).
+- **종료 순서**(서비스 stop 또는 `SIGTERM`/`SIGINT`): 로봇 프로그램의 **프로세스 그룹 전체**에 `stop_signals`를 순서대로 보낸다(기본 **`SIGINT` -> `SIGTERM`**). 각 신호에 `stop_grace_seconds`(기본 5초)의 균등 몫을 주고, 리더가 끝나면 거기서 멈춘다. 다 지나도 안 죽으면 그룹에 `SIGKILL`.
+  **왜 `SIGINT`가 먼저인가(개발용 VMX에서 `hal_hold`로 측정):** VMX HAL은 `SIGINT`를 받으면 pigpio를 정리하고 약 **0.2초 만에 종료**한다(`Exiting VMX-pi HAL application ... [normal exit]`). `SIGTERM`은 pigpio를 정리하지만 **프로세스를 끝내지 않고 돌아온다**(`gdb`로 확인: 메인 스레드가 그대로 대기 루프). `SIGTERM`만 보내면 매번 유예 시간을 다 쓰고 `SIGKILL`로 끝난다.
+  HAL이 종료 때 찍는 `Signal 2 received by PIGPIOClient::signal_func()`, 스택 출력, `Exiting ... [normal exit]`는 정상 출력이다(옛 VMX 배포에서도 매번 보이던 메시지로 알려져 있으나 그 신호를 소스로 확인하지는 못했다. 옛 포크는 `frcKillRobot.sh -t`를 호출하고, 그 스크립트는 VMX 이미지 안에 있다).
+  리더 프로세스가 끝난 뒤에도 그룹에 남은 프로세스는 **남은 유예 시간까지 기다린 뒤** `SIGKILL`로 정리한다. 프로그램이 스스로 끝났는데(크래시 등) 자식이 남아 있으면 그 자식에게 먼저 `SIGTERM`, 유예 후 `SIGKILL`.
+  종료할 때마다 `robot program stopped by SIGINT after 0.2s` / `robot program killed after 5.0s`를 로그에 남기고, `SIGKILL`이 필요했다면 경고한다(프로그램의 정리 코드, 예를 들면 pigpio의 `gpioTerminate`가 돌지 않았다는 뜻이다).
+  서비스(`robot_manager`)는 종료 스레드가 끝날 때까지 기다린 뒤에 종료한다(그렇지 않으면 그룹 정리가 끊기고 systemd가 15초 뒤 대신 `SIGKILL`한다. 로봇에서 실제로 겪었다).
 - **플랫폼 프로필**: 커널 버전(`platform.release()`)에 맞는 프로필의 환경변수를 로봇 프로그램에 넣어준다
   (예: `HALSIMVMX_DIO_MAP`). OS/커널별로 핀 번호가 달라질 수 있다는 정황이 있어 이 계층에서 흡수한다(아래 참고).
 - **VMX를 직접 열지 않는다.** VMX(pigpio)는 로봇 프로그램이 연다. MockDS도 이 서비스의 역할이 아니다(사용자 코드).
@@ -51,7 +52,8 @@ deploy는 **GradleRIO가 SSH로 직접** 한다(2027과 동일). `robot_manager`
 
 - `robot_home` (필수): GradleRIO `VmxPi`의 deploy 디렉터리(`/home/<username>`)와 같아야 한다. 로봇 프로그램의 작업 디렉터리.
 - `robot_command` (선택): 기본값은 `<robot_home>/robotCommand`.
-- `stop_grace_seconds` (선택): `SIGTERM` 후 `SIGKILL` 전까지 기다리는 시간(초), 양수. 기본 5.
+- `stop_grace_seconds` (선택): 정지 신호들에 주는 전체 시간(초), 양수. 기본 5. 신호마다 균등하게 나눈다.
+- `stop_signals` (선택): 정지 신호 순서. `SIGINT`, `SIGTERM`, `SIGHUP`, `SIGQUIT`, `SIGUSR1`, `SIGUSR2` 중에서. 기본 `["SIGINT", "SIGTERM"]`.
 - 환경변수 우선순위: 서비스의 환경 < `env` < 일치한 프로필의 `env`. 값은 모두 문자열로 변환된다.
 - 프로필은 위에서부터 보고 `kernel_regex`가 처음 일치하는 것 하나만 적용한다.
 

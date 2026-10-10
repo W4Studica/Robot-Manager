@@ -1,5 +1,6 @@
 import json
 import os
+import signal
 import stat
 import sys
 import tempfile
@@ -138,7 +139,7 @@ class ManagerTest(unittest.TestCase):
 
     def test_stop_kills_a_program_that_ignores_sigterm(self):
         ready = os.path.join(self.home, "ready")
-        write_script(self.command, f'trap "" TERM; touch "{ready}"; while true; do sleep 1; done\n')
+        write_script(self.command, f'trap "" INT TERM; touch "{ready}"; while true; do sleep 1; done\n')
         manager, thread = self.start(stop_grace=0.5)
         self.assertTrue(wait_for(lambda: os.path.exists(ready)))
         started = time.monotonic()
@@ -182,12 +183,12 @@ class StopSequenceTest(ManagerTest):
         with self.assertLogs("robot_manager", level="INFO") as logs:
             self.finish(manager, thread)
         text = "\n".join(logs.output)
-        self.assertIn("robot program stopped after", text)
+        self.assertIn("robot program stopped by SIGINT after", text)
         self.assertNotIn("sending SIGKILL", text)
 
     def test_stop_reports_when_sigkill_was_needed(self):
         ready = os.path.join(self.home, "ready")
-        write_script(self.command, f'trap "" TERM; touch "{ready}"; while true; do sleep 1; done\n')
+        write_script(self.command, f'trap "" INT TERM; touch "{ready}"; while true; do sleep 1; done\n')
         manager, thread = self.start(stop_grace=0.5)
         self.assertTrue(wait_for(lambda: os.path.exists(ready)))
         with self.assertLogs("robot_manager", level="INFO") as logs:
@@ -195,6 +196,54 @@ class StopSequenceTest(ManagerTest):
         text = "\n".join(logs.output)
         self.assertIn("sending SIGKILL", text)
         self.assertIn("robot program killed after", text)
+
+
+class SignalOrderTest(ManagerTest):
+    def _stop_log(self, script, **kwargs):
+        ready = os.path.join(self.home, "ready")
+        write_script(self.command, f'touch "{ready}"\n' + script)
+        manager, thread = self.start(**kwargs)
+        self.assertTrue(wait_for(lambda: os.path.exists(ready)))
+        started = time.monotonic()
+        with self.assertLogs("robot_manager", level="INFO") as logs:
+            self.finish(manager, thread)
+        return "\n".join(logs.output), time.monotonic() - started
+
+    def test_sigint_goes_first_and_ends_a_program_that_ignores_sigterm(self):
+        # Like the VMX HAL: SIGINT is the real "stop", SIGTERM only cleans up and the program keeps running.
+        text, elapsed = self._stop_log("trap 'exit 0' INT\ntrap '' TERM\nwhile true; do sleep 1; done\n",
+                                       stop_grace=6.0)
+        self.assertIn("stopped by SIGINT", text)
+        self.assertNotIn("sending SIGKILL", text)
+        self.assertLess(elapsed, 3.0)  # well inside the share of the grace period given to SIGINT
+
+    def test_sigterm_is_the_fallback_when_sigint_does_not_end_the_program(self):
+        text, _ = self._stop_log("trap '' INT\ntrap 'exit 0' TERM\nwhile true; do sleep 1; done\n",
+                                 stop_grace=2.0)
+        self.assertIn("stopped by SIGTERM", text)
+        self.assertNotIn("sending SIGKILL", text)
+
+    def test_the_configured_order_is_used(self):
+        # Only SIGTERM is configured: a program that exits on SIGINT but ignores SIGTERM needs SIGKILL.
+        text, _ = self._stop_log("trap 'exit 0' INT\ntrap '' TERM\nwhile true; do sleep 1; done\n",
+                                 stop_grace=1.0, stop_signals=[signal.SIGTERM])
+        self.assertIn("sending SIGKILL", text)
+        self.assertIn("robot program killed after", text)
+
+
+class StopSignalsConfigTest(unittest.TestCase):
+    def test_default_is_sigint_then_sigterm(self):
+        self.assertEqual(rm.stop_signals_from_config({"robot_home": "/x"}), [signal.SIGINT, signal.SIGTERM])
+
+    def test_configured_order(self):
+        self.assertEqual(rm.stop_signals_from_config({"stop_signals": ["SIGTERM", "SIGINT"]}),
+                         [signal.SIGTERM, signal.SIGINT])
+        self.assertEqual(rm.stop_signals_from_config({"stop_signals": ["SIGHUP"]}), [signal.SIGHUP])
+
+    def test_invalid_values_are_rejected(self):
+        for bad in ([], "SIGINT", None, ["SIGKILL"], ["SIGINT", "NOPE"], [2], ["sigint"]):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                rm.stop_signals_from_config({"stop_signals": bad})
 
 
 class StopGraceConfigTest(unittest.TestCase):

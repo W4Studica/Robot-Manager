@@ -37,6 +37,26 @@ def stop_grace_from_config(config):
     return float(value)
 
 
+# What the VMX HAL does on each signal (measured on a VMX-pi, hal_hold): SIGINT -> cleans up pigpio and exits
+# in about 0.2 s; SIGTERM -> cleans up pigpio but returns and the process keeps running. So SIGINT goes first.
+DEFAULT_STOP_SIGNALS = ("SIGINT", "SIGTERM")
+ALLOWED_STOP_SIGNALS = ("SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT", "SIGUSR1", "SIGUSR2")
+
+
+def stop_signals_from_config(config):
+    """Signals sent, in order, to ask the robot program to stop. 'stop_signals' in the config."""
+    names = config.get("stop_signals", list(DEFAULT_STOP_SIGNALS))
+    if not isinstance(names, list) or not names:
+        raise ValueError("config: 'stop_signals' must be a non-empty list, got %r" % (names,))
+    signals = []
+    for name in names:
+        if name not in ALLOWED_STOP_SIGNALS:
+            raise ValueError("config: 'stop_signals' entries must be among %s, got %r"
+                             % (", ".join(ALLOWED_STOP_SIGNALS), name))
+        signals.append(getattr(signal, name))
+    return signals
+
+
 def load_config(path):
     with open(path, "r", encoding="utf-8") as f:
         config = json.load(f)
@@ -74,7 +94,7 @@ class Manager:
     """Runs the robot command in a loop until stop() is called."""
 
     def __init__(self, command_file, cwd, env, backoff_initial=1.0, backoff_max=10.0,
-                 min_uptime=10.0, wait_poll=2.0, stop_grace=5.0):
+                 min_uptime=10.0, wait_poll=2.0, stop_grace=5.0, stop_signals=None):
         self.command_file = command_file
         self.cwd = cwd
         self.env = env
@@ -83,6 +103,7 @@ class Manager:
         self.min_uptime = min_uptime
         self.wait_poll = wait_poll
         self.stop_grace = stop_grace
+        self.stop_signals = list(stop_signals) if stop_signals else [signal.SIGINT, signal.SIGTERM]
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._proc = None
@@ -147,20 +168,31 @@ class Manager:
         if proc is None or proc.poll() is not None:
             return
         started = time.monotonic()
-        log.info("stopping robot program (pid %d), SIGTERM then SIGKILL after %.0fs", proc.pid, self.stop_grace)
-        _signal_group(proc, signal.SIGTERM)
-        killed = False
-        try:
-            proc.wait(self.stop_grace)
-        except subprocess.TimeoutExpired:
-            killed = True
+        names = " then ".join(signal.Signals(sig).name for sig in self.stop_signals)
+        log.info("stopping robot program (pid %d): %s, then SIGKILL; %.0fs in total", proc.pid, names,
+                 self.stop_grace)
+
+        # Each signal gets an equal share of the grace period. The first one that ends the leader wins.
+        step = self.stop_grace / len(self.stop_signals)
+        stopped_by = None
+        for sig in self.stop_signals:
+            _signal_group(proc, sig)
+            try:
+                proc.wait(step)
+                stopped_by = signal.Signals(sig).name
+                break
+            except subprocess.TimeoutExpired:
+                continue
+
+        killed = stopped_by is None
+        if killed:
             log.warning("robot program did not stop within %.0fs; sending SIGKILL (its cleanup, such as "
                         "gpioTerminate, did not run)", self.stop_grace)
             _signal_group(proc, signal.SIGKILL)
             proc.wait()
-        # SIGTERM already went to the whole group; give the rest of the group what is left of the grace period.
+        # The signals already went to the whole group; give the rest of the group what is left of the grace period.
         self._reap_group(proc.pid, "robot program stopped", send_term=False, deadline=started + self.stop_grace)
-        log.info("robot program %s after %.1fs", "killed" if killed else "stopped",
+        log.info("robot program %s after %.1fs", "killed" if killed else "stopped by " + stopped_by,
                  time.monotonic() - started)
 
     def _reap_group(self, pgid, why, send_term, deadline=None):
@@ -226,7 +258,8 @@ def main(argv=None):
     env = build_environment(config, platform.release())
     command_file = config.get("robot_command") or os.path.join(config["robot_home"], ROBOT_COMMAND_FILE)
 
-    manager = Manager(command_file, config["robot_home"], env, stop_grace=stop_grace_from_config(config))
+    manager = Manager(command_file, config["robot_home"], env, stop_grace=stop_grace_from_config(config),
+                      stop_signals=stop_signals_from_config(config))
 
     stop_threads = []
 
