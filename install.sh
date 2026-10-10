@@ -64,6 +64,9 @@ die() { echo "install.sh: $*" >&2; exit 1; }
 info() { echo "==> $*"; }
 warn() { echo "WARNING: $*" >&2; }
 
+# The parsing loop below shifts "$@" away; keep the original arguments for the sudo re-run.
+ORIG_ARGS=("$@")
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --user) [ $# -ge 2 ] || die "--user needs a value"; LOGIN_USER="$2"; shift ;;
@@ -225,7 +228,7 @@ EOF
 # Not root: re-run through sudo (it asks for the password itself). A dry run needs no root.
 if [ "$DRY_RUN" != 1 ] && [ "$(id -u)" != 0 ]; then
   command -v sudo >/dev/null 2>&1 || die "must run as root (sudo not found)"
-  exec sudo "$0" "$@"
+  exec sudo "$0" "${ORIG_ARGS[@]}"
 fi
 
 [ -n "$LOGIN_USER" ] || LOGIN_USER="${SUDO_USER:-$(id -un)}"
