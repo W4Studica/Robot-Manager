@@ -9,14 +9,14 @@ import vmx_net as net  # noqa: E402
 
 IW_PHY = """\
 		Band 1:
-			* 2412 MHz [1] (20.0 dBm)
+			* 2412.0 MHz [1] (20.0 dBm)
 		Band 2:
-			* 5180 MHz [36] (22.0 dBm)
-			* 5200 MHz [40] (22.0 dBm)
-			* 5260 MHz [52] (22.0 dBm) (no IR, radar detection)
-			* 5500 MHz [100] (22.0 dBm) (radar detection)
-			* 5700 MHz [140] (disabled)
-			* 5745 MHz [149] (22.0 dBm)
+			* 5180.0 MHz [36] (22.0 dBm)
+			* 5200.0 MHz [40] (22.0 dBm)
+			* 5260.0 MHz [52] (22.0 dBm) (no IR, radar detection)
+			* 5500.0 MHz [100] (22.0 dBm) (radar detection)
+			* 5700.0 MHz [140] (disabled)
+			* 5745.0 MHz [149] (22.0 dBm)
 """
 
 

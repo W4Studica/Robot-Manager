@@ -123,7 +123,7 @@ def parse_5ghz_channels(iw_phy_output):
     """Channels of the 5 GHz band that are usable now, from `iw phy` text: entries that are not disabled/radar/no IR."""
     channels = []
     for line in iw_phy_output.splitlines():
-        m = re.match(r"\s*\*\s*(\d+)\s*MHz\s*\[(\d+)\](.*)", line)
+        m = re.match(r"\s*\*\s*(\d+)(?:\.\d+)?\s*MHz\s*\[(\d+)\](.*)", line)
         if not m:
             continue
         freq, channel, rest = int(m.group(1)), int(m.group(2)), m.group(3)
