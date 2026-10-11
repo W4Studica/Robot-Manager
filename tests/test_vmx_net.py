@@ -220,7 +220,7 @@ class HotspotTest(NetTestCase):
         self.assertIn("--on-active=3", unit[0])
         self.assertEqual(unit[0][-3:-1], ["/bin/sh", "-c"])
         net_uuid = system.read_uuid(self.path("robot-ap"))
-        self.assertEqual(unit[0][-1], "nmcli connection reload; nmcli connection up uuid " + net_uuid)
+        self.assertTrue(unit[0][-1].startswith("nmcli connection reload; nmcli connection up uuid " + net_uuid))
         # a session over the wired port is not cut: it is applied at once
         other = FakeSystem(ssh_connection="172.22.11.5 5555 172.22.11.2 22", route_dev="eth0")
         self.assertFalse(net.setup_hotspot(other, "VMX", 1234, "2.4", "password")["deferred"])
@@ -235,6 +235,23 @@ class HotspotTest(NetTestCase):
         self.assertNotIn(["nmcli", "connection", "delete", "uuid", "eth-uuid"], system.runs)
         self.assertNotIn(["nmcli", "connection", "delete", "uuid", "home-uuid"], system.runs)
         self.assertEqual(system.runs[-1], ["nmcli", "connection", "up", "uuid", new])
+
+    def test_5ghz_offers_only_the_standard_channels_and_defaults_to_36(self):
+        self.assertEqual(net.valid_channels("a", [34, 36, 38, 40, 149]), [36, 40, 149])
+        self.assertEqual(net.default_channel([34, 36, 40]), 36)
+        self.assertEqual(net.default_channel([149, 153]), 149)
+        self.assertEqual(net.default_channel(list(range(1, 12))), 6)
+
+    def test_a_5ghz_access_point_that_does_not_start_falls_back_to_2_4ghz(self):
+        system = FakeSystem(ssh_connection="192.168.0.220 5555 192.168.0.222 22", route_dev="wlan0")
+        net.setup_hotspot(system, "VMX", 1234, "5", "password", channel=36)
+        script = [r for r in system.runs if r[0] == "systemd-run"][0][-1]
+        self.assertIn(" || { nmcli connection modify uuid ", script)
+        self.assertIn("802-11-wireless.band bg 802-11-wireless.channel 6", script)
+        # 2.4 GHz has no fallback
+        system = FakeSystem(ssh_connection="192.168.0.220 5555 192.168.0.222 22", route_dev="wlan0")
+        net.setup_hotspot(system, "VMX", 1234, "2.4", "password")
+        self.assertNotIn("||", [r for r in system.runs if r[0] == "systemd-run"][0][-1])
 
     def test_the_old_force_flag_is_still_accepted(self):
         self.assertEqual(net.main(["setupHotspot", "--force", "VMX", "1234", "2.4"], FakeSystem()), 0)

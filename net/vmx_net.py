@@ -64,15 +64,25 @@ def band_to_nm(band):
     raise NetError("the band must be 2.4 or 5, got %r" % (band,))
 
 
+# The 5 GHz channels of the standard channel plan. `iw phy` also lists others (34, 38, 42, 46: 5170-5230 MHz in odd steps),
+# and an access point on one of them did not start.
+STANDARD_5GHZ = {36, 40, 44, 48, 52, 56, 60, 64, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144,
+                 149, 153, 157, 161, 165}
+
+
 def default_channel(channels, preferred=DEFAULTS["channel"]):
-    """Channel 6 on 2.4 GHz: on the development VMX a PC did not see the access point on channel 1."""
-    return preferred if preferred in channels else channels[0]
+    """Channel 6 on 2.4 GHz (on the development VMX a PC did not see the access point on channel 1); 36 on 5 GHz, which needs
+    no radar detection (DFS), else 149."""
+    for candidate in (preferred, 36, 149):
+        if candidate in channels:
+            return candidate
+    return channels[0]
 
 
 def valid_channels(nm_band, allowed_5ghz=None):
     if nm_band == "bg":
         return list(range(1, 12))  # 1-11: the channels every country allows
-    return sorted(allowed_5ghz or [])
+    return sorted(c for c in (allowed_5ghz or []) if c in STANDARD_5GHZ)
 
 
 def check_wpa_password(password):
@@ -271,18 +281,38 @@ def ssh_arrives_through(system, interface):
 DEFER_SECONDS = 3
 
 
-def activate(system, interface, steps):
+def _shell(steps):
+    return "; ".join(" ".join(shlex.quote(a) for a in args) for args, _ in steps)
+
+
+def activate(system, interface, steps, fallback=None):
     """Runs the nmcli steps [(args, check), ...]. If the ssh session this is run from comes in over `interface`, the change
     would cut it: the steps then run DEFER_SECONDS later in a systemd unit of their own, which does not depend on the
-    session. Returns True if they were deferred."""
+    session. Returns True if they were deferred. `fallback` (steps) runs if the last step fails, so that a setting the
+    radio refuses does not leave the robot without any network."""
     if ssh_arrives_through(system, interface):
-        script = "; ".join(" ".join(shlex.quote(a) for a in args) for args, _ in steps)
+        script = _shell(steps)
+        if fallback:
+            script += " || { %s; }" % _shell(fallback)
         system.run(["systemd-run", "--unit=w4studica-net-%d" % int(time.time()), "--on-active=%d" % DEFER_SECONDS,
                     "--description=W4Studica: apply the network change", "/bin/sh", "-c", script])
         return True
-    for args, check in steps:
-        system.run(args, check=check)
+    for i, (args, check) in enumerate(steps):
+        try:
+            system.run(args, check=check or (bool(fallback) and i == len(steps) - 1))
+        except NetError as e:
+            if not fallback or i != len(steps) - 1:
+                raise
+            for fallback_args, _ in fallback:
+                system.run(fallback_args, check=False)
+            raise NetError("%s; the previous setting was put back" % e)
     return False
+
+
+def fallback_2_4ghz(keep_uuid):
+    return [(["nmcli", "connection", "modify", "uuid", keep_uuid, "802-11-wireless.band", "bg", "802-11-wireless.channel",
+              str(DEFAULTS["channel"])], False),
+            (["nmcli", "connection", "up", "uuid", keep_uuid], False)]
 
 
 def reload_steps(system, name, keep_uuid):
@@ -329,7 +359,8 @@ def setup_hotspot(system, ssid_prefix, team, band, password, channel=None, force
     path = os.path.join(NM_DIR, AP_NAME + ".nmconnection")
     connection_uuid = system.read_uuid(path) or str(uuid.uuid4())
     system.write_secret(path, ap_keyfile(ssid, team, nm_band, channel, password, interface, connection_uuid=connection_uuid))
-    deferred = apply and activate(system, interface, reload_steps(system, AP_NAME, connection_uuid))
+    deferred = apply and activate(system, interface, reload_steps(system, AP_NAME, connection_uuid),
+                                  fallback_2_4ghz(connection_uuid) if nm_band == "a" else None)
     return {"ssid": ssid, "address": team_to_address(team), "band": nm_band, "channel": channel, "interface": interface,
             "deferred": deferred}
 
