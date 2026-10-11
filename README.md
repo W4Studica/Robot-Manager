@@ -38,6 +38,10 @@ WPILib이 `linuxarm64`로 배포하는 `libMrcLib.so`(Driver Station/로봇 통�
 
 `robot_manager`가 `/proc/cpuinfo`의 `Features`에 `atomics`가 없으면 **스스로 `LD_AUDIT`을 설정**한다(`install.sh`가 `libvmx_lse_emu.so`를 설치). 설정: `"lse_emulation": "auto"`(기본) / `"off"` / `"on"`, `"lse_emulation_library"`. `env`에 이미 `LD_AUDIT`이 있으면 건드리지 않는다. 자세한 내용은 [lse_emu/README.md](lse_emu/README.md).
 
+## 강제 종료(SIGKILL)와 pigpio
+
+`robot_manager`는 로봇 프로그램을 `SIGINT` -> `SIGTERM` -> `SIGKILL` 순서로 멈춘다(`stop_signals`). 프로그램이 `SIGKILL`로 죽으면(`stop_grace_seconds` 안에 안 끝났을 때, 또는 누군가 `kill -9` 했을 때) pigpio가 GPU 메모리를 정리하지 못해서 **새어 나가고**, 몇 번 쌓이면 다음 시작이 `initMboxBlock: init mbox zaps failed`로 실패한다(로봇에서 측정). 재부팅하면 풀린다. 모터는 이 경우에도 멈춘다: `TitanEnableGuard`/`StudicaTitan`(allwpilib `halsim_vmx`)이 enable 프레임을 반복 송신에 맡기지 않아서, 프로그램이 죽으면 Titan이 200 ms 안에 스스로 멈춘다.
+
 ## deploy와의 관계
 
 deploy는 **GradleRIO가 SSH로 직접** 한다(2027과 동일). `robot_manager`는 deploy에 관여하지 않고 결과물만 실행한다.
