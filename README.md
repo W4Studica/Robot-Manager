@@ -10,7 +10,7 @@ VMX-pi에서 상시 실행되는 서비스. roboRIO의 로봇 프로그램 기�
 - 아직 deploy가 안 돼서 `robotCommand`가 없으면 로그를 한 번 남기고 파일이 생길 때까지 기다린다.
 - 크래시 반복 시 1초부터 최대 10초까지 간격을 늘려서 재시작한다. 10초 이상 돌았던 프로그램은 빠르게 다시 시작한다.
 - **종료 순서**(서비스 stop 또는 `SIGTERM`/`SIGINT`): 로봇 프로그램의 **프로세스 그룹 전체**에 `stop_signals`를 순서대로 보낸다(기본 **`SIGINT` -> `SIGTERM`**). 각 신호에 `stop_grace_seconds`(기본 5초)의 균등 몫을 주고, 리더가 끝나면 거기서 멈춘다. 다 지나도 안 죽으면 그룹에 `SIGKILL`.
-  **왜 `SIGINT`가 먼저인가(개발용 VMX에서 `hal_hold`로 측정):** VMX HAL은 `SIGINT`를 받으면 pigpio를 정리하고 약 **0.2초 만에 종료**한다(`Exiting VMX-pi HAL application ... [normal exit]`). `SIGTERM`은 pigpio를 정리하지만 **프로세스를 끝내지 않고 돌아온다**(`gdb`로 확인: 메인 스레드가 그대로 대기 루프). `SIGTERM`만 보내면 매번 유예 시간을 다 쓰고 `SIGKILL`로 끝난다.
+  **왜 `SIGINT`가 먼저인가(개발용 VMX에서 HAL만 초기화하고 대기하는 시험 프로그램으로 측정):** VMX HAL은 `SIGINT`를 받으면 pigpio를 정리하고 약 **0.2초 만에 종료**한다(`Exiting VMX-pi HAL application ... [normal exit]`). `SIGTERM`은 pigpio를 정리하지만 **프로세스를 끝내지 않고 돌아온다**(`gdb`로 확인: 메인 스레드가 그대로 대기 루프). `SIGTERM`만 보내면 매번 유예 시간을 다 쓰고 `SIGKILL`로 끝난다.
   HAL이 종료 때 찍는 `Signal 2 received by PIGPIOClient::signal_func()`, 스택 출력, `Exiting ... [normal exit]`는 정상 출력이다(옛 VMX 배포에서도 매번 보이던 메시지로 알려져 있으나 그 신호를 소스로 확인하지는 못했다. 옛 포크는 `frcKillRobot.sh -t`를 호출하고, 그 스크립트는 VMX 이미지 안에 있다).
   리더 프로세스가 끝난 뒤에도 그룹에 남은 프로세스는 **남은 유예 시간까지 기다린 뒤** `SIGKILL`로 정리한다. 프로그램이 스스로 끝났는데(크래시 등) 자식이 남아 있으면 그 자식에게 먼저 `SIGTERM`, 유예 후 `SIGKILL`.
   종료할 때마다 `robot program stopped by SIGINT after 0.2s` / `robot program killed after 5.0s`를 로그에 남기고, `SIGKILL`이 필요했다면 경고한다(프로그램의 정리 코드, 예를 들면 pigpio의 `gpioTerminate`가 돌지 않았다는 뜻이다).

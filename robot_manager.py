@@ -38,7 +38,7 @@ def stop_grace_from_config(config):
     return float(value)
 
 
-# What the VMX HAL does on each signal (measured on a VMX-pi, hal_hold): SIGINT -> cleans up pigpio and exits
+# What the VMX HAL does on each signal (measured on a VMX-pi with a program that only initialises the HAL and waits): SIGINT -> cleans up pigpio and exits
 # in about 0.2 s; SIGTERM -> cleans up pigpio but returns and the process keeps running. So SIGINT goes first.
 DEFAULT_STOP_SIGNALS = ("SIGINT", "SIGTERM")
 ALLOWED_STOP_SIGNALS = ("SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT", "SIGUSR1", "SIGUSR2")
