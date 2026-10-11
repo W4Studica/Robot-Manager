@@ -30,6 +30,14 @@ sysfs GPIO가 없는 커널(예: Ubuntu 26.04 / 커널 7.0)에서 VMX HAL이 `RP
 
 자세한 내용과 한계는 [gpio_isr_shim/README.md](gpio_isr_shim/README.md). **PC에서 콜백 규약만 테스트했고 실기기 검증 전이다.**
 
+## LSE 원자 명령 에뮬레이션 (`lse_emu/`)
+
+WPILib이 `linuxarm64`로 배포하는 `libMrcLib.so`(Driver Station/로봇 통신, 소스 비공개)는 **SystemCore 툴체인(Buildroot GCC 14.3)으로 빌드돼서 ARMv8.1 LSE 원자 명령**(`swp`, `ldadd`, `cas`)을 코드 곳곳에 쓴다(1,219곳). Pi 4(Cortex-A72, ARMv8.0)에는 이 명령이 없어서 **`SIGILL`**이 난다. 로봇에서 실측: 프로세스 종료 때 `uv_library_shutdown()`에서 죽어 종료 코드 132와 코어 덤프가 매번 생겼다. 다른 WPILib 라이브러리와 우리 코드에는 CPU를 확인해서 쓰는 libgcc 보조 함수(`__aarch64_*`)만 있어 문제가 없다.
+
+`lse_emu/`는 `SIGILL`을 잡아 그 명령을 같은 동작의 일반 원자 연산(`ldxr/stxr`)으로 대신 실행하고 다음 명령으로 넘어가는 라이브러리다(원자성 유지, 명령마다 신호 한 번 분의 비용). **`LD_PRELOAD`가 아니라 `LD_AUDIT`으로 올려야** 한다: 로더는 라이브러리를 목록 뒤쪽부터 초기화해서, 프리로드한 라이브러리는 MrcLib의 생성자보다 늦게 초기화되기 때문이다(측정함).
+
+`robot_manager`가 `/proc/cpuinfo`의 `Features`에 `atomics`가 없으면 **스스로 `LD_AUDIT`을 설정**한다(`install.sh`가 `libvmx_lse_emu.so`를 설치). 설정: `"lse_emulation": "auto"`(기본) / `"off"` / `"on"`, `"lse_emulation_library"`. `env`에 이미 `LD_AUDIT`이 있으면 건드리지 않는다. 자세한 내용은 [lse_emu/README.md](lse_emu/README.md).
+
 ## deploy와의 관계
 
 deploy는 **GradleRIO가 SSH로 직접** 한다(2027과 동일). `robot_manager`는 deploy에 관여하지 않고 결과물만 실행한다.

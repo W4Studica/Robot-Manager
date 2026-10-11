@@ -20,7 +20,9 @@
 #   3. Studica plugin     /opt/halsim_vmx/libhalsim_vmx_studica.so for halsim_vmx (needs g++ >= 11, VMXPi.h)
 #   4. GPIO interrupt shim /opt/robot_manager/lib/libvmx_gpio_isr_shim.so (needs gcc and make). Fixes
 #                         "RPI GPIO Interrupt Enable: PI_BAD_ISR_INIT" on kernels without GPIO sysfs
-#   5. sudoers (opt-in)   lets the login user run the few sudo commands `gradlew deploy` uses, without a password
+#   5. LSE atomics emulation /opt/robot_manager/lib/libvmx_lse_emu.so (needs gcc and make). Lets WPILib's libMrcLib
+#                         (SystemCore build, uses ARMv8.1 atomics) run on a Pi 4; robot_manager turns it on by itself
+#   6. sudoers (opt-in)   lets the login user run the few sudo commands `gradlew deploy` uses, without a password
 #
 # NOT VERIFIED on a real VMX-pi: the commands in steps 2 and 3 and the systemd unit were only
 # syntax-checked and dry-run on a PC. See allwpilib/simulation/halsim_vmx/HARDWARE_CHECKLIST.md.
@@ -41,6 +43,7 @@ SKIP_DRIVERS=0
 UPGRADE_DRIVERS=0
 SKIP_PLUGIN=0
 SKIP_SHIM=0
+SKIP_LSE_EMU=0
 ROBOT_HOME=""
 LOGIN_USER=""
 # Defaults: this repo is where install.sh is; allwpilib is a sibling checkout (or inside this directory).
@@ -61,6 +64,7 @@ Options:
   --upgrade-drivers        replace an already installed studica_drivers (e.g. from the vmx-hal package) with this repo's copy
   --skip-plugin            do not build the Studica backend plugin
   --skip-shim              do not build the GPIO interrupt shim (libvmx_gpio_isr_shim.so)
+  --skip-lse-emu           do not build the LSE atomics emulation (libvmx_lse_emu.so)
   --dry-run                print what would be done, change nothing
   -h, --help               this text
 EOF
@@ -84,6 +88,7 @@ while [ $# -gt 0 ]; do
     --upgrade-drivers) UPGRADE_DRIVERS=1 ;;
     --skip-plugin) SKIP_PLUGIN=1 ;;
     --skip-shim) SKIP_SHIM=1 ;;
+    --skip-lse-emu) SKIP_LSE_EMU=1 ;;
     --dry-run) DRY_RUN=1 ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; die "unknown argument: $1" ;;
@@ -227,6 +232,28 @@ install_shim() {
   fi
 }
 
+install_lse_emu() {
+  info "LSE atomics emulation"
+  if [ "$SKIP_LSE_EMU" = 1 ]; then echo "  skipped (--skip-lse-emu)"; return; fi
+  local src="$RM_DIR/lse_emu"
+  [ -f "$src/lse_emu.c" ] || { warn "$src/lse_emu.c not found; skipping the LSE emulation"; return; }
+  if ! command -v gcc >/dev/null 2>&1 || ! command -v make >/dev/null 2>&1; then
+    warn "gcc and make are required; skipping the LSE emulation (sudo apt install -y g++ make)"; return
+  fi
+
+  run rm -rf "$BUILD_DIR/lse_emu"
+  run install -d "$BUILD_DIR" "$OPT_DIR/lib"
+  run cp -r "$src" "$BUILD_DIR/lse_emu"
+  run make -C "$BUILD_DIR/lse_emu" test
+  run make -C "$BUILD_DIR/lse_emu"
+  run install -m 0755 "$BUILD_DIR/lse_emu/libvmx_lse_emu.so" "$OPT_DIR/lib/libvmx_lse_emu.so"
+  if grep -m1 '^Features' /proc/cpuinfo 2>/dev/null | grep -qw atomics; then
+    echo "  this CPU has LSE atomics: robot_manager will not load it"
+  else
+    echo "  this CPU has no LSE atomics (Raspberry Pi 4): robot_manager sets LD_AUDIT=$OPT_DIR/lib/libvmx_lse_emu.so itself"
+  fi
+}
+
 install_sudoers() {
   info "sudoers for '$LOGIN_USER'"
   if [ "$WITH_SUDOERS" != 1 ]; then echo "  skipped (pass --sudoers to allow passwordless deploy)"; return; fi
@@ -258,6 +285,7 @@ summary() {
   config:    $CONF_DIR/config.json   (robot_home = $ROBOT_HOME)
   plugin:    $PLUGIN_DIR/libhalsim_vmx_studica.so   -> HALSIMVMX_BACKEND
   shim:      $OPT_DIR/lib/libvmx_gpio_isr_shim.so   -> LD_PRELOAD (only on kernels without /sys/class/gpio)
+  lse emu:   $OPT_DIR/lib/libvmx_lse_emu.so   -> LD_AUDIT, set by robot_manager on CPUs without LSE atomics
 Next: allwpilib/simulation/halsim_vmx/HARDWARE_CHECKLIST.md (section 1 onward). Nothing here has been run on a VMX yet.
 EOF
 }
@@ -276,5 +304,6 @@ install_robot_manager
 install_drivers
 install_plugin
 install_shim
+install_lse_emu
 install_sudoers
 summary

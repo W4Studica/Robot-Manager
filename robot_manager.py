@@ -24,6 +24,7 @@ log = logging.getLogger("robot_manager")
 
 DEFAULT_CONFIG = "/etc/robot_manager/config.json"
 ROBOT_COMMAND_FILE = "robotCommand"
+DEFAULT_LSE_EMU_LIBRARY = "/opt/robot_manager/lib/libvmx_lse_emu.so"
 
 
 DEFAULT_STOP_GRACE = 5.0
@@ -77,10 +78,52 @@ def select_profile(config, kernel_release):
     return None, {}
 
 
-def build_environment(config, kernel_release, base_env=None):
-    """os.environ < config 'env' < matched profile 'env'. Values are converted to str."""
+def cpu_has_lse(cpuinfo_path="/proc/cpuinfo"):
+    """True if the CPU runs ARMv8.1 LSE atomics itself ("atomics" in the Features line of /proc/cpuinfo).
+
+    Returns None when it cannot tell (not an ARM Linux, unreadable file), which callers treat as "do nothing".
+    """
+    try:
+        with open(cpuinfo_path, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("Features"):
+                    return "atomics" in line.split(":", 1)[1].split()
+    except OSError:
+        return None
+    return None
+
+
+def lse_emulation_env(config, has_lse, env):
+    """LD_AUDIT for the LSE emulation library, when the CPU lacks LSE, the library exists and nothing sets LD_AUDIT.
+
+    libMrcLib.so (WPILib, binary only) uses LSE instructions, which a Raspberry Pi 4 does not have: without this the
+    robot program dies with SIGILL, at the latest when it exits. See lse_emu/lse_emu.c. An audit library, not
+    LD_PRELOAD, because it has to be initialised before the libraries the program needs.
+    Config: "lse_emulation": "auto" (default) | "off" | "on", and "lse_emulation_library": "<path>".
+    """
+    mode = str(config.get("lse_emulation", "auto")).lower()
+    library = config.get("lse_emulation_library", DEFAULT_LSE_EMU_LIBRARY)
+    if mode == "off":
+        return {}
+    if mode == "auto" and has_lse is not False:
+        return {}  # the CPU has LSE, or we cannot tell
+    if not os.path.isfile(library):
+        if mode == "on" or has_lse is False:
+            log.warning("this CPU has no LSE atomics, but %s is not installed: programs using libMrcLib will "
+                        "die with SIGILL (run install.sh)", library)
+        return {}
+    if env.get("LD_AUDIT"):
+        log.warning("LD_AUDIT is already set (%s); not adding the LSE emulation", env["LD_AUDIT"])
+        return {}
+    log.info("CPU without LSE atomics: LD_AUDIT=%s", library)
+    return {"LD_AUDIT": library}
+
+
+def build_environment(config, kernel_release, base_env=None, has_lse=None):
+    """os.environ < LSE emulation < config 'env' < matched profile 'env'. Values are converted to str."""
     env = dict(os.environ if base_env is None else base_env)
     env.update({k: str(v) for k, v in config.get("env", {}).items()})
+    env.update(lse_emulation_env(config, has_lse, env))
     name, profile_env = select_profile(config, kernel_release)
     if name is not None:
         log.info("platform profile '%s' matched kernel %s", name, kernel_release)
@@ -255,7 +298,7 @@ def main(argv=None):
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s", stream=sys.stdout)
 
     config = load_config(args.config)
-    env = build_environment(config, platform.release())
+    env = build_environment(config, platform.release(), has_lse=cpu_has_lse())
     command_file = config.get("robot_command") or os.path.join(config["robot_home"], ROBOT_COMMAND_FILE)
 
     manager = Manager(command_file, config["robot_home"], env, stop_grace=stop_grace_from_config(config),

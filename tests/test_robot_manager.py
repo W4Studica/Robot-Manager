@@ -147,6 +147,62 @@ class ManagerTest(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 8)
 
 
+class LseEmulationTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.library = os.path.join(self.dir, "libvmx_lse_emu.so")
+        with open(self.library, "w", encoding="utf-8") as f:
+            f.write("x")
+
+    def cpuinfo(self, features):
+        path = os.path.join(self.dir, "cpuinfo")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("processor\t: 0\nBogoMIPS\t: 108.00\nFeatures\t: %s\nCPU part\t: 0xd08\n" % features)
+        return path
+
+    def test_detects_lse_from_the_features_line(self):
+        self.assertTrue(rm.cpu_has_lse(self.cpuinfo("fp asimd evtstrm crc32 atomics cpuid")))
+        self.assertFalse(rm.cpu_has_lse(self.cpuinfo("fp asimd evtstrm crc32 cpuid")))
+        # a different feature that merely contains the word is not LSE
+        self.assertFalse(rm.cpu_has_lse(self.cpuinfo("fp asimd lrcpc ilrcpc")))
+
+    def test_unknown_when_there_is_no_cpuinfo_or_no_features_line(self):
+        self.assertIsNone(rm.cpu_has_lse(os.path.join(self.dir, "missing")))
+        path = os.path.join(self.dir, "x86")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("flags : sse sse2\n")
+        self.assertIsNone(rm.cpu_has_lse(path))
+
+    def test_audit_library_is_added_when_the_cpu_has_no_lse(self):
+        config = {"lse_emulation_library": self.library}
+        env = rm.build_environment(config, "7.0.0", base_env={}, has_lse=False)
+        self.assertEqual(env["LD_AUDIT"], self.library)
+
+    def test_nothing_is_added_when_the_cpu_has_lse_or_it_is_unknown(self):
+        config = {"lse_emulation_library": self.library}
+        for has_lse in (True, None):
+            self.assertNotIn("LD_AUDIT", rm.build_environment(config, "7.0.0", base_env={}, has_lse=has_lse))
+
+    def test_off_disables_it_and_on_forces_it(self):
+        off = {"lse_emulation": "off", "lse_emulation_library": self.library}
+        self.assertNotIn("LD_AUDIT", rm.build_environment(off, "7.0.0", base_env={}, has_lse=False))
+        on = {"lse_emulation": "on", "lse_emulation_library": self.library}
+        self.assertEqual(rm.build_environment(on, "7.0.0", base_env={}, has_lse=True)["LD_AUDIT"], self.library)
+
+    def test_a_missing_library_adds_nothing_and_warns(self):
+        config = {"lse_emulation_library": os.path.join(self.dir, "not-installed.so")}
+        with self.assertLogs("robot_manager", level="WARNING") as logs:
+            env = rm.build_environment(config, "7.0.0", base_env={}, has_lse=False)
+        self.assertNotIn("LD_AUDIT", env)
+        self.assertTrue(any("not installed" in line for line in logs.output))
+
+    def test_an_ld_audit_from_the_user_is_kept(self):
+        config = {"lse_emulation_library": self.library, "env": {"LD_AUDIT": "/mine/audit.so"}}
+        with self.assertLogs("robot_manager", level="WARNING"):
+            env = rm.build_environment(config, "7.0.0", base_env={}, has_lse=False)
+        self.assertEqual(env["LD_AUDIT"], "/mine/audit.so")
+
+
 class StopSequenceTest(ManagerTest):
     def test_a_child_that_ignores_sigterm_is_killed_when_the_leader_exits(self):
         # The leader exits on SIGTERM but leaves a child that ignores it. The leader being gone must not
