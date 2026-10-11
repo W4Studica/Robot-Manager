@@ -22,8 +22,13 @@ The operation is performed with a sequentially consistent atomic compiled to an 
 with respect to every other thread. **Not** emulated: `CASP`, `LDAPR` and anything else; those still crash with `SIGILL`
 (or go to a handler that was installed before). A foreign `SIGILL` is never swallowed.
 
-Cost: one signal round trip (microseconds) per emulated instruction. Fine for start-up, shutdown and occasional use;
-a library that executes millions of such instructions per second would slow down.
+Cost, MEASURED on a Raspberry Pi 4 (`make bench`, kernel 7.0): **about 26.8 microseconds per emulated instruction, roughly 1,200
+times a plain atomic add (21.6 ns)**, the same with four threads at once. Fine for start-up, shutdown and occasional use. The
+programs tried so far (simulation HAL, sensors, Titan) emulate **one** instruction in total, at exit. A path that executes
+thousands per second (the Driver Station network code inside libMrcLib, if it is ever used) would cost a large part of a core:
+count them with `VMX_LSE_EMU_DEBUG=1` first. If that is too slow the next step is to rewrite the instructions when the
+library is loaded (branch to a short load/store-exclusive sequence), which removes the signal, at the price of patching code
+in memory and handling every register alias correctly. Not done.
 
 ## Cost (`make bench`)
 
@@ -39,4 +44,4 @@ on all CPUs at once. Run it on the robot (under qemu the numbers mean nothing).
 
 On the PC: cross compile with the WPILib arm64 toolchain and run under `qemu-aarch64 -cpu cortex-a72` (no LSE) with
 `-E LD_AUDIT=...`; with `-cpu max` (LSE) the same test runs natively. **Not run on a real Pi 4 yet** (install.sh runs
-`make test` on the robot, which is that run).
+`make test` on the robot, which is that run: 224 forms and the thread test passed on a Pi 4 on 2026-10-10).
