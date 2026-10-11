@@ -159,7 +159,6 @@ EOF
 
   run systemctl daemon-reload
   run systemctl enable "$SERVICE"
-  run systemctl restart "$SERVICE"
 }
 
 install_drivers() {
@@ -254,6 +253,12 @@ install_lse_emu() {
   fi
 }
 
+# Last, so robot_manager starts with every library in place: it looks for the LSE emulation library when it starts.
+restart_service() {
+  info "Restarting $SERVICE"
+  run systemctl restart "$SERVICE"
+}
+
 install_sudoers() {
   info "sudoers for '$LOGIN_USER'"
   if [ "$WITH_SUDOERS" != 1 ]; then echo "  skipped (pass --sudoers to allow passwordless deploy)"; return; fi
@@ -306,4 +311,5 @@ install_plugin
 install_shim
 install_lse_emu
 install_sudoers
+restart_service
 summary
