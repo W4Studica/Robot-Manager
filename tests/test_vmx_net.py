@@ -23,7 +23,8 @@ IW_PHY = """\
 class FakeSystem(net.System):
     """Records the commands and answers them from a table; files go to a temporary directory."""
 
-    def __init__(self, nm_active=True, root=True, ssh_connection=None, route_dev="eth0", wifi_connections=(), tty=False):
+    def __init__(self, nm_active=True, root=True, ssh_connection=None, route_dev="eth0", wifi_connections=(), tty=False,
+                 nmcli_missing=False):
         self.runs = []
         self.nm_active = nm_active
         self.root = root
@@ -32,9 +33,18 @@ class FakeSystem(net.System):
         self.wifi_connections = list(wifi_connections)
         self.tty = tty
         self.answers = []
+        self.nmcli_missing = nmcli_missing
+
+    def interfaces(self):
+        return ["eth0", "lo", "wlan0"]
+
+    def is_wireless(self, name):
+        return name == "wlan0"
 
     def run(self, args, check=True):
         self.runs.append(list(args))
+        if args[0] == "nmcli" and self.nmcli_missing:
+            raise FileNotFoundError("nmcli")
         if args[:2] == ["systemctl", "is-active"]:
             return "active\n" if self.nm_active else "inactive\n"
         if args[:5] == ["nmcli", "-t", "-f", "DEVICE,TYPE", "device"]:
@@ -198,6 +208,67 @@ class HotspotTest(NetTestCase):
         net.setup_hotspot(system, "VMX", 1234, "2.4", "password", force=True)
         other = FakeSystem(ssh_connection="172.22.11.5 5555 172.22.11.2 22", route_dev="eth0")
         net.setup_hotspot(other, "VMX", 1234, "2.4", "password")
+
+
+class BeforeNetworkManagerTest(NetTestCase):
+    """install.sh --network writes the connection files first and lets NetworkManager start afterwards."""
+
+    def test_the_interfaces_are_found_without_nmcli(self):
+        system = FakeSystem(nmcli_missing=True)
+        self.assertEqual(net.wifi_interface(system), "wlan0")
+        self.assertEqual(net.ethernet_interface(system), "eth0")
+
+    def test_no_activate_only_writes_the_files(self):
+        system = FakeSystem(nm_active=False, nmcli_missing=True,
+                            ssh_connection="192.168.0.220 5555 192.168.0.222 22", route_dev="wlan0")
+        net.setup_ethernet(system, activate=False)
+        info = net.setup_hotspot(system, "VMX", 1234, "2.4", "password", activate=False)
+        self.assertEqual(info["address"], "10.12.34.2")
+        self.assertIn("address1=172.22.11.2/24", self.read("robot-eth"))
+        self.assertIn("ssid=VMX-1234", self.read("robot-ap"))
+        # no connection is touched, no NetworkManager check and no SSH guard (the switch-over is install.sh's job).
+        # Asking nmcli which devices exist is fine: it fails when nmcli is not installed yet.
+        self.assertFalse(any(r[:2] == ["nmcli", "connection"] for r in system.runs))
+        self.assertFalse(any(r[:2] == ["systemctl", "is-active"] for r in system.runs))
+
+    def test_the_command_line_flag(self):
+        system = FakeSystem(nm_active=False, nmcli_missing=True)
+        self.assertEqual(net.main(["setupHotspot", "--no-activate", "VMX", "1234", "2.4"], system), 0)
+        self.assertEqual(net.main(["setupEthernet", "--no-activate"], system), 0)
+        self.assertTrue(os.path.exists(self.path("robot-ap")))
+        self.assertTrue(os.path.exists(self.path("robot-eth")))
+
+    def test_without_the_flag_networkmanager_is_still_required(self):
+        with self.assertRaises(net.NetError):
+            net.setup_hotspot(FakeSystem(nm_active=False), "VMX", 1234, "2.4", "password")
+
+
+class SshDeviceTest(NetTestCase):
+    def test_the_device_the_session_comes_in_over(self):
+        self.assertEqual(net.ssh_device(FakeSystem(ssh_connection="192.168.0.220 1 192.168.0.222 22", route_dev="wlan0")), "wlan0")
+        self.assertEqual(net.ssh_device(FakeSystem(ssh_connection="172.22.11.5 1 172.22.11.2 22", route_dev="eth0")), "eth0")
+
+    def test_no_ssh_session_means_no_device(self):
+        self.assertEqual(net.ssh_device(FakeSystem()), "")
+
+    def test_the_command_prints_it(self):
+        import io
+        import contextlib
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            net.main(["sshdevice"], FakeSystem(ssh_connection="192.168.0.220 1 192.168.0.222 22", route_dev="wlan0"))
+        self.assertEqual(out.getvalue().strip(), "wlan0")
+
+    def test_the_real_lookup_reads_the_variable_from_a_parent_process(self):
+        # what sudo does: the child has no SSH_CONNECTION, its parent does
+        import subprocess
+        code = ("import sys; sys.path.insert(0, %r); import vmx_net; print(vmx_net.System().environ('SSH_CONNECTION'))"
+                % os.path.join(os.path.dirname(__file__), "..", "net"))
+        env = dict(os.environ, SSH_CONNECTION="10.1.2.3 1 10.1.2.4 22")
+        # the trailing "; true" keeps the shell as the parent (a shell would otherwise exec the last command)
+        script = "unset SSH_CONNECTION; python3 -c \"%s\"; true" % code.replace('"', '\\"')
+        out = subprocess.run(["sh", "-c", script], env=env, capture_output=True, text=True, timeout=20)
+        self.assertEqual(out.stdout.strip(), "10.1.2.3 1 10.1.2.4 22", out.stderr)
 
 
 class EthernetTest(NetTestCase):

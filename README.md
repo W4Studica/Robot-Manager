@@ -61,10 +61,17 @@ sudo setupEthernet                               # 유선 172.22.11.2 (DHCP 서�
 ```
 
 `install.sh`는 이 명령들을 항상 설치하고, **`--network`를 줄 때만** 적용한다(`--team`, `--ap-ssid`, `--ap-band`, `--ap-password`로 값 변경).
-NetworkManager(`shared` 모드, `dnsmasq-base` 필요)로 동작하며 연결 파일은 `/etc/NetworkManager/system-connections/robot-*.nmconnection`(모드 0600, 비밀번호는 명령줄에 나오지 않는다)에 쓴다.
 
-**주의: 무선으로 SSH 중이면 Wi-Fi를 AP로 바꾸는 순간 연결이 끊긴다.** 그래서 지금 세션이 바꿀 인터페이스로 들어오고 있으면 명령이 **거부**한다(유선 쪽도 마찬가지). 유선이나 화면/키보드로 접속해서 하거나 `--force`(`install.sh`는 `--force-network`)를 준다.
-PC에서만 테스트했다(NetworkManager를 흉내 낸 단위 테스트 30개: 팀 번호->주소, 키파일 내용, 채널 검증, 접속 끊김 방지, 모드 전환). **로봇에서는 아직 실행해 보지 않았다.** 로봇의 네트워크 구성은 `system/network_probe.sh`(읽기 전용)로 먼저 확인한다.
+**`--network`가 하는 일 (Ubuntu Server는 NetworkManager가 아니라 systemd-networkd + netplan이라서):**
+1. `network-manager`, `dnsmasq-base`, `iw` 설치(인터넷 필요).
+2. 유선 `172.22.11.2`와 AP 연결 파일을 `/etc/NetworkManager/system-connections/robot-*.nmconnection`(모드 0600)에 씀.
+3. 기존 `/etc/netplan/*.yaml`을 `/etc/netplan/w4studica-backup-<시각>/`로 **치워 두고**(지우지 않음) renderer만 NetworkManager인 netplan 파일을 씀. cloud-init이 부팅 때 다시 쓰지 못하게 끔.
+4. **스크립트가 끝난 8초 뒤에** NetworkManager로 전환(`systemd-networkd` 중지, `NetworkManager` 시작). 이때 **SSH 세션이 끊긴다**(집 Wi-Fi 설정은 더 이상 쓰지 않음).
+5. 다시 접속: **랜선**(PC를 DHCP로 두면 `172.22.11.X`를 받음) `ssh <사용자>@172.22.11.2`, 또는 **Wi-Fi AP** `VMX-1234`(비밀번호 `password`)에 붙어서 `ssh <사용자>@10.12.34.2`.
+
+무선이나 유선으로 SSH 중이면 `--force-network` 없이는 거부한다(세션이 끊기기 때문; `sudo`가 환경변수를 지워도 부모 프로세스에서 찾는다). **되돌리기:** 로봇의 화면과 키보드에서 `sudo /opt/robot_manager/bin/undo_network.sh`(또는 `install.sh --undo-network`)가 netplan 파일을 복구하고 `systemd-networkd`를 되살린다.
+`setupHotspot`/`setupEthernet`의 `--no-activate`는 연결 파일만 쓰고 아무것도 켜지 않는다(`install.sh`가 사용). NetworkManager의 `shared` 모드로 동작하며 비밀번호는 명령줄에 나오지 않는다.
+**PC에서만 테스트했다**(NetworkManager를 흉내 낸 단위 테스트 39개 + `install.sh --dry-run`). **로봇에서는 아직 실행하지 않았다.** 로봇의 현재 구성은 `system/network_probe.sh`(읽기 전용)로 확인한다(2026-10-11 개발용 로봇: systemd-networkd + netplan, NetworkManager/hostapd/dnsmasq/iw 없음).
 
 ## CPU 최대 성능 (`system/`)
 

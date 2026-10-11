@@ -52,6 +52,7 @@ SKIP_LSE_EMU=0
 SKIP_CPU_MAX=0
 APPLY_NETWORK=0
 FORCE_NETWORK=0
+UNDO_NETWORK=0
 AP_SSID=VMX
 AP_TEAM=1234
 AP_BAND=2.4
@@ -86,7 +87,9 @@ Options:
   --ap-band 2.4|5          Wi-Fi band for --network (default 2.4, channel 1)
   --ap-password PASSWORD   Wi-Fi password for --network (default: the VMX image default; visible in the process list while
                            install.sh runs, so use setupHotspot afterwards for a private one)
-  --force-network          apply --network even if this ssh session comes in over the Wi-Fi/wired port it changes
+  --force-network          apply --network even though this ssh session will end (it comes in over the Wi-Fi or wired port
+                           that is changed); reconnect through the wired port (172.22.11.2) or the robot's Wi-Fi
+  --undo-network           put the network back (restores the netplan files that --network set aside) and exit
   --dry-run                print what would be done, change nothing
   -h, --help               this text
 EOF
@@ -114,6 +117,7 @@ while [ $# -gt 0 ]; do
     --skip-cpu-max) SKIP_CPU_MAX=1 ;;
     --network) APPLY_NETWORK=1 ;;
     --force-network) FORCE_NETWORK=1 ;;
+    --undo-network) UNDO_NETWORK=1 ;;
     --ap-ssid) [ $# -ge 2 ] || die "--ap-ssid needs a value"; AP_SSID="$2"; shift ;;
     --team) [ $# -ge 2 ] || die "--team needs a value"; AP_TEAM="$2"; shift ;;
     --ap-band) [ $# -ge 2 ] || die "--ap-band needs a value"; AP_BAND="$2"; shift ;;
@@ -309,11 +313,78 @@ install_cpu_max() {
   fi
 }
 
+ssh_device() { python3 "$OPT_DIR/net/vmx_net.py" sshdevice 2>/dev/null || true; }
+
+# Makes NetworkManager the network manager (Ubuntu Server ships systemd-networkd + netplan) and sets up the Wi-Fi access
+# point and the wired port. Everything is written first, while the ssh session still works; the switch itself runs a few
+# seconds after install.sh has finished, because it ends the session.
+apply_network() {
+  local dev; dev="$(ssh_device)"
+  if [ -n "$dev" ] && [ "$FORCE_NETWORK" != 1 ]; then
+    die "this ssh session comes in over $dev, which --network changes: it will end. Reconnect through the wired port (172.22.11.2) or the robot's Wi-Fi '$AP_SSID-$AP_TEAM' (the access point), then pass --force-network. (A screen and keyboard are the safest way; --undo-network goes back.)"
+  fi
+
+  local missing=0
+  command -v nmcli >/dev/null 2>&1 || missing=1
+  command -v iw >/dev/null 2>&1 || missing=1
+  [ -x /usr/sbin/dnsmasq ] || command -v dnsmasq >/dev/null 2>&1 || missing=1   # dnsmasq-base: NetworkManager's DHCP server
+  if [ "$missing" = 1 ]; then
+    info "Installing network-manager, dnsmasq-base and iw (needs the internet)"
+    run env DEBIAN_FRONTEND=noninteractive apt-get install -y network-manager dnsmasq-base iw \
+      || die "apt could not install the network packages; the network was not changed"
+  fi
+
+  # The connection files: written for NetworkManager, which has not started yet.
+  run install -d -m 0755 /etc/NetworkManager/system-connections
+  run "$OPT_DIR/net/vmx_net.py" setupEthernet --no-activate
+  run "$OPT_DIR/net/vmx_net.py" setupHotspot --no-activate "$AP_SSID" "$AP_TEAM" "$AP_BAND" "$AP_PASSWORD"
+
+  # netplan: hand every interface to NetworkManager. The old files are set aside, not deleted (--undo-network).
+  local backup; backup="/etc/netplan/w4studica-backup-$(date +%Y%m%d-%H%M%S)"
+  if ls /etc/netplan/*.yaml >/dev/null 2>&1; then
+    run install -d -m 0700 "$backup"
+    run sh -c "mv /etc/netplan/*.yaml '$backup'/"
+  fi
+  write_file /etc/netplan/01-w4studica-network-manager.yaml 0600 <<'YAML'
+# Installed by W4Studica install.sh --network: NetworkManager manages the interfaces (Wi-Fi access point, wired 172.22.11.2).
+network:
+  version: 2
+  renderer: NetworkManager
+YAML
+  # cloud-init would write its own netplan file again at the next boot.
+  run install -d /etc/cloud/cloud.cfg.d
+  write_file /etc/cloud/cloud.cfg.d/99-w4studica-disable-network-config.cfg 0644 <<'CFG'
+# Installed by W4Studica install.sh --network: the network is configured through NetworkManager, not cloud-init.
+network: {config: disabled}
+CFG
+  run install -m 0755 "$RM_DIR/system/undo_network.sh" "$OPT_DIR/bin/undo_network.sh"
+
+  local address; address="$(python3 -c "import sys; t=int(sys.argv[1]); print('10.%d.%d.2' % (t//100, t%100))" "$AP_TEAM")"
+  local pw="the one you gave"; [ "$AP_PASSWORD" = password ] && pw="password"
+  cat <<MSG
+  Network prepared. In 8 seconds the robot switches to NetworkManager:
+    wired port  172.22.11.2   (a computer on the cable gets 172.22.11.X from the robot)
+    Wi-Fi       access point '$AP_SSID-$AP_TEAM'  ->  $address   (the home Wi-Fi is not used any more)
+  THIS SSH SESSION ENDS. Reconnect:
+    - cable:  set the PC to DHCP, then   ssh $LOGIN_USER@172.22.11.2
+    - Wi-Fi:  join '$AP_SSID-$AP_TEAM' (password: $pw), then   ssh $LOGIN_USER@$address
+  Go back (on the robot's screen and keyboard):   sudo $OPT_DIR/bin/undo_network.sh
+MSG
+  run systemd-run --unit=w4studica-network-switch --on-active=8 --description="W4Studica: switch to NetworkManager" \
+    /bin/sh -c 'netplan generate && systemctl disable --now systemd-networkd.service systemd-networkd.socket systemd-networkd-wait-online.service; systemctl enable --now NetworkManager.service'
+}
+
+undo_network() {
+  info "Undo --network"
+  [ -f "$RM_DIR/system/undo_network.sh" ] || die "$RM_DIR/system/undo_network.sh not found"
+  run sh "$RM_DIR/system/undo_network.sh"
+}
+
 install_network() {
   info "Network (Wi-Fi access point and fixed wired address)"
   local src="$RM_DIR/net/vmx_net.py"
   [ -f "$src" ] || { warn "$src not found; skipping the network commands"; return; }
-  run install -d "$OPT_DIR/net"
+  run install -d "$OPT_DIR/net" "$OPT_DIR/bin"
   run install -m 0755 "$src" "$OPT_DIR/net/vmx_net.py"
   local cmd
   for cmd in setupHotspot toggleNetMode setupEthernet; do
@@ -322,23 +393,10 @@ install_network() {
   echo "  installed: setupHotspot, toggleNetMode, setupEthernet"
 
   if [ "$APPLY_NETWORK" != 1 ]; then
-    echo "  network left as it is (add --network, or: sudo setupHotspot VMX 1234 2.4 password; sudo setupEthernet)"
+    echo "  network left as it is (add --network to apply it, see --help)"
     return
   fi
-  if [ "$DRY_RUN" != 1 ]; then
-    if ! systemctl is-active --quiet NetworkManager; then
-      warn "NetworkManager is not running, so the network was not changed (sudo apt install -y network-manager dnsmasq-base)"; return
-    fi
-    if ! command -v dnsmasq >/dev/null 2>&1; then
-      warn "dnsmasq is missing, NetworkManager cannot hand out addresses: sudo apt install -y dnsmasq-base"; return
-    fi
-  fi
-  local force=()
-  [ "$FORCE_NETWORK" = 1 ] && force=(--force)
-  # The wired port first: it is the way back in if the Wi-Fi change goes wrong.
-  run "$OPT_DIR/net/vmx_net.py" setupEthernet "${force[@]}"
-  run "$OPT_DIR/net/vmx_net.py" setupHotspot "${force[@]}" "$AP_SSID" "$AP_TEAM" "$AP_BAND" "$AP_PASSWORD"
-  echo "  the VMX is 172.22.11.2 on the wired port and $(python3 -c "import sys; t=int(sys.argv[1]); print('10.%d.%d.2' % (t//100, t%100))" "$AP_TEAM") on the Wi-Fi '$AP_SSID-$AP_TEAM'"
+  apply_network
 }
 
 # Last, so robot_manager starts with every library in place: it looks for the LSE emulation library when it starts.
@@ -393,6 +451,11 @@ fi
 
 [ -n "$LOGIN_USER" ] || LOGIN_USER="${SUDO_USER:-$(id -un)}"
 [ -n "$ROBOT_HOME" ] || ROBOT_HOME="/home/$LOGIN_USER"
+
+if [ "$UNDO_NETWORK" = 1 ]; then
+  undo_network
+  exit 0
+fi
 
 preflight
 install_robot_manager

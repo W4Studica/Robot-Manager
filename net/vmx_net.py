@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """VMX networking, the way Studica's VMX image does it: setupHotspot and toggleNetMode.
 
-  setupHotspot [--channel N] [--force] SSID TEAMNUMBER BAND [PASSWORD]
+  setupHotspot [--channel N] [--force] [--no-activate] SSID TEAMNUMBER BAND [PASSWORD]
       Wi-Fi access point. SSID is a prefix: SSID "VMX" and team 1234 give the network "VMX-1234". BAND is 2.4 or 5.
       The VMX is 10.XX.YY.2 on it (team 1234 -> 10.12.34.2) and hands out addresses to the computers that join.
       Defaults of the VMX image: setupHotspot VMX 1234 2.4 password   (channel 1)
   toggleNetMode ap | wifi [SSID PASSWORD] [--force]
       ap: Wi-Fi is the access point.  wifi: the access point is off and the VMX joins a router (updates, packages).
-  setupEthernet [--force] [IFACE]
+  setupEthernet [--force] [--no-activate] [IFACE]
       The wired port is always 172.22.11.2 and hands out 172.22.11.X addresses (a computer plugged in directly).
   vmx_net.py status
 
@@ -153,7 +153,35 @@ class System:
         os.remove(path)
 
     def environ(self, name):
-        return os.environ.get(name)
+        """The variable from our environment or, because sudo drops SSH_CONNECTION, from a parent process's."""
+        value = os.environ.get(name)
+        if value:
+            return value
+        pid = os.getppid()
+        key = (name + "=").encode()
+        for _ in range(8):
+            try:
+                with open("/proc/%d/environ" % pid, "rb") as f:
+                    for item in f.read().split(b"\0"):
+                        if item.startswith(key):
+                            return item[len(key):].decode(errors="replace")
+                with open("/proc/%d/status" % pid, encoding="utf-8") as f:
+                    m = re.search(r"PPid:\s*(\d+)", f.read())
+            except OSError:
+                break
+            if not m or int(m.group(1)) <= 1:
+                break
+            pid = int(m.group(1))
+        return None
+
+    def interfaces(self):
+        try:
+            return sorted(os.listdir("/sys/class/net"))
+        except OSError:
+            return []
+
+    def is_wireless(self, name):
+        return os.path.isdir("/sys/class/net/%s/wireless" % name)
 
     def is_root(self):
         return os.geteuid() == 0
@@ -169,20 +197,47 @@ def network_manager_active(system):
     return system.run(["systemctl", "is-active", "NetworkManager"], check=False).strip() == "active"
 
 
-def wifi_interface(system):
-    for line in system.run(["nmcli", "-t", "-f", "DEVICE,TYPE", "device"], check=False).splitlines():
+def _nmcli_devices(system, wanted):
+    try:
+        output = system.run(["nmcli", "-t", "-f", "DEVICE,TYPE", "device"], check=False)
+    except (OSError, NetError):  # nmcli is not installed yet
+        return None
+    for line in output.splitlines():
         device, _, kind = line.partition(":")
-        if kind == "wifi":
+        if kind == wanted:
             return device
+    return None
+
+
+def wifi_interface(system):
+    """The Wi-Fi interface: from NetworkManager, else the first wireless one in /sys/class/net, else wlan0."""
+    found = _nmcli_devices(system, "wifi")
+    if found:
+        return found
+    for name in system.interfaces():
+        if system.is_wireless(name):
+            return name
     return "wlan0"
 
 
 def ethernet_interface(system):
-    for line in system.run(["nmcli", "-t", "-f", "DEVICE,TYPE", "device"], check=False).splitlines():
-        device, _, kind = line.partition(":")
-        if kind == "ethernet":
-            return device
+    found = _nmcli_devices(system, "ethernet")
+    if found:
+        return found
+    for name in system.interfaces():
+        if name != "lo" and not system.is_wireless(name) and name.startswith(("eth", "en")):
+            return name
     return "eth0"
+
+
+def ssh_device(system):
+    """The interface the SSH session this runs in comes in over ("" if it is not an SSH session)."""
+    connection = system.environ("SSH_CONNECTION")
+    if not connection:
+        return ""
+    route = system.run(["ip", "-o", "route", "get", connection.split()[0]], check=False)
+    m = re.search(r"\bdev\s+(\S+)", route)
+    return m.group(1) if m else ""
 
 
 def ssh_arrives_through(system, interface):
@@ -210,10 +265,12 @@ def reload_connection(system, name):
 
 # ---- commands ---------------------------------------------------------------------------------------------------------
 
-def setup_hotspot(system, ssid_prefix, team, band, password, channel=None, force=False):
+def setup_hotspot(system, ssid_prefix, team, band, password, channel=None, force=False, activate=True):
+    """activate=False only writes the NetworkManager connection file (NetworkManager need not be installed yet); the
+    connection comes up when NetworkManager starts."""
     if not system.is_root():
         raise NetError("run it with sudo")
-    if not network_manager_active(system):
+    if activate and not network_manager_active(system):
         raise NetError("NetworkManager is not running; this needs it (see install.sh --network)")
     team_to_address(team)  # validates the team number before anything else uses it
     nm_band = band_to_nm(band)
@@ -231,25 +288,29 @@ def setup_hotspot(system, ssid_prefix, team, band, password, channel=None, force
             channel = channels[0]
     if channel not in channels:
         raise NetError("channel %d is not valid for %s GHz here; valid: %s" % (channel, band, ", ".join(map(str, channels))))
-    guard_ssh(system, interface, force, "turning the Wi-Fi into an access point")
+    if activate:
+        guard_ssh(system, interface, force, "turning the Wi-Fi into an access point")
 
     ssid = ssid_for(ssid_prefix, team)
     path = os.path.join(NM_DIR, AP_NAME + ".nmconnection")
     system.write_secret(path, ap_keyfile(ssid, team, nm_band, channel, password, interface))
-    reload_connection(system, AP_NAME)
+    if activate:
+        reload_connection(system, AP_NAME)
     return {"ssid": ssid, "address": team_to_address(team), "band": nm_band, "channel": channel, "interface": interface}
 
 
-def setup_ethernet(system, interface=None, force=False):
+def setup_ethernet(system, interface=None, force=False, activate=True):
     if not system.is_root():
         raise NetError("run it with sudo")
-    if not network_manager_active(system):
+    if activate and not network_manager_active(system):
         raise NetError("NetworkManager is not running")
     interface = interface or ethernet_interface(system)
-    guard_ssh(system, interface, force, "fixing the wired port at 172.22.11.2")
+    if activate:
+        guard_ssh(system, interface, force, "fixing the wired port at 172.22.11.2")
     path = os.path.join(NM_DIR, ETH_NAME + ".nmconnection")
     system.write_secret(path, ethernet_keyfile(interface))
-    system.run(["nmcli", "connection", "reload"])
+    if activate:
+        system.run(["nmcli", "connection", "reload"])
     return {"interface": interface, "address": ETH_ADDRESS}
 
 
@@ -321,6 +382,7 @@ def main(argv=None, system=None):
     p = sub.add_parser("setupHotspot", help="make the Wi-Fi an access point")
     p.add_argument("ssid"); p.add_argument("team"); p.add_argument("band"); p.add_argument("password", nargs="?", default=None)
     p.add_argument("--channel", type=int); p.add_argument("--force", action="store_true")
+    p.add_argument("--no-activate", action="store_true", help="only write the connection file (install.sh uses it)")
 
     p = sub.add_parser("toggleNetMode", help="ap | wifi")
     p.add_argument("mode"); p.add_argument("ssid", nargs="?"); p.add_argument("password", nargs="?")
@@ -328,21 +390,26 @@ def main(argv=None, system=None):
 
     p = sub.add_parser("setupEthernet", help="the wired port: 172.22.11.2 with a DHCP server")
     p.add_argument("interface", nargs="?"); p.add_argument("--force", action="store_true")
+    p.add_argument("--no-activate", action="store_true", help="only write the connection file (install.sh uses it)")
 
     sub.add_parser("status")
+    sub.add_parser("sshdevice", help="the interface this ssh session comes in over (install.sh uses it)")
     args = parser.parse_args(argv)
     try:
         if args.command == "setupHotspot":
             password = args.password if args.password is not None else DEFAULTS["password"]
-            info = setup_hotspot(system, args.ssid, args.team, args.band, password, args.channel, args.force)
+            info = setup_hotspot(system, args.ssid, args.team, args.band, password, args.channel, args.force,
+                                 activate=not args.no_activate)
             print("Wi-Fi access point '%s' on %s (channel %d): the VMX is %s" % (
                 info["ssid"], info["interface"], info["channel"], info["address"]))
         elif args.command == "toggleNetMode":
             info = toggle_net_mode(system, args.mode, args.ssid, args.password, args.force)
             print("network mode: %s" % info["mode"])
         elif args.command == "setupEthernet":
-            info = setup_ethernet(system, args.interface, args.force)
+            info = setup_ethernet(system, args.interface, args.force, activate=not args.no_activate)
             print("wired port %s: %s with a DHCP server" % (info["interface"], info["address"]))
+        elif args.command == "sshdevice":
+            print(ssh_device(system))
         else:
             print(status(system), end="")
     except NetError as e:
