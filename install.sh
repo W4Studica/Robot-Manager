@@ -84,7 +84,7 @@ Options:
                            commands (setupHotspot, toggleNetMode, setupEthernet) are installed and nothing is changed.
   --team N                 team number for --network (default 1234 -> SSID VMX-1234, 10.12.34.2)
   --ap-ssid PREFIX         SSID prefix for --network (default VMX)
-  --ap-band 2.4|5          Wi-Fi band for --network (default 2.4, channel 1)
+  --ap-band 2.4|5          Wi-Fi band for --network (default 2.4, channel 6)
   --ap-password PASSWORD   Wi-Fi password for --network (default: the VMX image default; visible in the process list while
                            install.sh runs, so use setupHotspot afterwards for a private one)
   --force-network          apply --network even though this ssh session will end (it comes in over the Wi-Fi or wired port

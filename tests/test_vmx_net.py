@@ -128,8 +128,8 @@ class HelperTest(unittest.TestCase):
         self.assertEqual(net.valid_channels("bg"), list(range(1, 12)))
 
     def test_the_default_access_point_keyfile(self):
-        text = net.ap_keyfile("VMX-1234", 1234, "bg", 1, "password", "wlan0", connection_uuid="u")
-        for line in ("id=robot-ap", "type=wifi", "interface-name=wlan0", "mode=ap", "ssid=VMX-1234", "band=bg", "channel=1",
+        text = net.ap_keyfile("VMX-1234", 1234, "bg", 6, "password", "wlan0", connection_uuid="u")
+        for line in ("id=robot-ap", "type=wifi", "interface-name=wlan0", "mode=ap", "ssid=VMX-1234", "band=bg", "channel=6",
                      "key-mgmt=wpa-psk", "psk=password", "method=shared", "address1=10.12.34.2/24", "autoconnect=true"):
             self.assertIn(line, text.splitlines())
 
@@ -144,7 +144,7 @@ class HotspotTest(NetTestCase):
     def test_defaults_of_the_vmx_image(self):
         system = FakeSystem()
         info = net.setup_hotspot(system, "VMX", 1234, "2.4", "password")
-        self.assertEqual((info["ssid"], info["address"], info["channel"]), ("VMX-1234", "10.12.34.2", 1))
+        self.assertEqual((info["ssid"], info["address"], info["channel"]), ("VMX-1234", "10.12.34.2", 6))
         text = self.read("robot-ap")
         self.assertIn("ssid=VMX-1234", text)
         self.assertIn("address1=10.12.34.2/24", text)
@@ -183,8 +183,16 @@ class HotspotTest(NetTestCase):
         system.answers = ["6"]
         self.assertEqual(net.setup_hotspot(system, "VMX", 1234, "2.4", "password")["channel"], 6)
         system = FakeSystem(tty=True)
-        system.answers = [""]   # Enter keeps the first one
-        self.assertEqual(net.setup_hotspot(system, "VMX", 1234, "2.4", "password")["channel"], 1)
+        system.answers = [""]   # Enter keeps the default
+        self.assertEqual(net.setup_hotspot(system, "VMX", 1234, "2.4", "password")["channel"], 6)
+
+    def test_a_second_setup_keeps_the_connection_uuid(self):
+        system = FakeSystem()
+        net.setup_hotspot(system, "VMX", 1234, "2.4", "password")
+        path = os.path.join(net.NM_DIR, "robot-ap.nmconnection")
+        first = system.read_uuid(path)
+        net.setup_hotspot(system, "VMX", 1234, "2.4", "password", channel=11)
+        self.assertEqual(system.read_uuid(path), first)
 
     def test_5ghz_uses_only_the_channels_this_country_allows(self):
         info = net.setup_hotspot(FakeSystem(), "VMX", 1234, "5", "password")

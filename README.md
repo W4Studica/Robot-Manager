@@ -53,7 +53,7 @@ WPILib이 `linuxarm64`로 배포하는 `libMrcLib.so`(Driver Station/로봇 통�
 | Wi-Fi 클라이언트 | 공유기가 줌 | AP를 끄고 공유기에 접속. 업데이트/패키지 다운로드용 |
 
 ```bash
-sudo setupHotspot VMX 1234 2.4 password          # SSID접두사 팀번호 밴드 [비밀번호]; 채널은 물어본다(--channel N)
+sudo setupHotspot VMX 1234 2.4 password          # SSID접두사 팀번호 밴드 [비밀번호]; 채널은 물어본다(기본 6)(--channel N)
 sudo setupHotspot TestRobot 4444 2.4 Checkers    # TestRobot-4444, 10.44.44.2
 sudo toggleNetMode wifi HomeRouter routerpass    # 공유기에 접속 (AP는 꺼짐; 이후 `toggleNetMode wifi`만으로 다시)
 sudo toggleNetMode ap                            # 다시 AP

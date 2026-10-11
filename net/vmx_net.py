@@ -4,7 +4,7 @@
   setupHotspot [--channel N] [--force] [--no-activate] SSID TEAMNUMBER BAND [PASSWORD]
       Wi-Fi access point. SSID is a prefix: SSID "VMX" and team 1234 give the network "VMX-1234". BAND is 2.4 or 5.
       The VMX is 10.XX.YY.2 on it (team 1234 -> 10.12.34.2) and hands out addresses to the computers that join.
-      Defaults of the VMX image: setupHotspot VMX 1234 2.4 password   (channel 1)
+      Defaults of the VMX image: setupHotspot VMX 1234 2.4 password   (channel 6)
   toggleNetMode ap | wifi [SSID PASSWORD] [--force]
       ap: Wi-Fi is the access point.  wifi: the access point is off and the VMX joins a router (updates, packages).
   setupEthernet [--force] [--no-activate] [IFACE]
@@ -27,7 +27,7 @@ AP_NAME = "robot-ap"
 CLIENT_NAME = "robot-client"
 ETH_NAME = "robot-eth"
 ETH_ADDRESS = "172.22.11.2/24"
-DEFAULTS = {"ssid": "VMX", "team": 1234, "band": "2.4", "password": "password", "channel": 1}
+DEFAULTS = {"ssid": "VMX", "team": 1234, "band": "2.4", "password": "password", "channel": 6}
 
 
 class NetError(Exception):
@@ -59,6 +59,11 @@ def band_to_nm(band):
     if text == "5":
         return "a"
     raise NetError("the band must be 2.4 or 5, got %r" % (band,))
+
+
+def default_channel(channels, preferred=DEFAULTS["channel"]):
+    """Channel 6 on 2.4 GHz: on the development VMX a PC did not see the access point on channel 1."""
+    return preferred if preferred in channels else channels[0]
 
 
 def valid_channels(nm_band, allowed_5ghz=None):
@@ -145,6 +150,15 @@ class System:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
         os.chmod(path, 0o600)
+
+    def read_uuid(self, path):
+        """The uuid of the connection file already there (so a second setup replaces the profile instead of adding one)."""
+        try:
+            with open(path, encoding="utf-8") as f:
+                m = re.search(r"^uuid=(\S+)$", f.read(), re.M)
+        except OSError:
+            return None
+        return m.group(1) if m else None
 
     def exists(self, path):
         return os.path.exists(path)
@@ -282,10 +296,11 @@ def setup_hotspot(system, ssid_prefix, team, band, password, channel=None, force
         raise NetError("no usable 5 GHz channel here (set the country first: sudo iw reg set KR); use band 2.4")
     if channel is None:
         if system.interactive():
-            answer = system.ask("channel %s [%d]: " % ("/".join(str(c) for c in channels), channels[0])).strip()
-            channel = int(answer) if answer else channels[0]
+            default = default_channel(channels)
+            answer = system.ask("channel %s [%d]: " % ("/".join(str(c) for c in channels), default)).strip()
+            channel = int(answer) if answer else default
         else:
-            channel = channels[0]
+            channel = default_channel(channels)
     if channel not in channels:
         raise NetError("channel %d is not valid for %s GHz here; valid: %s" % (channel, band, ", ".join(map(str, channels))))
     if activate:
@@ -293,7 +308,8 @@ def setup_hotspot(system, ssid_prefix, team, band, password, channel=None, force
 
     ssid = ssid_for(ssid_prefix, team)
     path = os.path.join(NM_DIR, AP_NAME + ".nmconnection")
-    system.write_secret(path, ap_keyfile(ssid, team, nm_band, channel, password, interface))
+    system.write_secret(path, ap_keyfile(ssid, team, nm_band, channel, password, interface,
+                                         connection_uuid=system.read_uuid(path)))
     if activate:
         reload_connection(system, AP_NAME)
     return {"ssid": ssid, "address": team_to_address(team), "band": nm_band, "channel": channel, "interface": interface}
