@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the CPU at its highest frequency (VMX robot)
+# Ubuntu's ondemand.service sets the governor to "ondemand" a minute after boot; install.sh disables it, and this runs after it anyway.
+After=sysinit.target ondemand.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/robot_manager/bin/robot_cpu_max.sh
+
+[Install]
+WantedBy=multi-user.target

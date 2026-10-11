@@ -22,7 +22,12 @@
 #                         "RPI GPIO Interrupt Enable: PI_BAD_ISR_INIT" on kernels without GPIO sysfs
 #   5. LSE atomics emulation /opt/robot_manager/lib/libvmx_lse_emu.so (needs gcc and make). Lets WPILib's libMrcLib
 #                         (SystemCore build, uses ARMv8.1 atomics) run on a Pi 4; robot_manager turns it on by itself
-#   6. sudoers (opt-in)   lets the login user run the few sudo commands `gradlew deploy` uses, without a password
+#   6. CPU at full speed /opt/robot_manager/bin/robot_cpu_max.sh + robot_cpu_max.service: governor "performance" and the
+#                         minimum frequency raised to the maximum, at every boot (a 20 ms robot loop should not wait for the clock)
+#   7. network commands   setupHotspot / toggleNetMode / setupEthernet (like the Studica VMX image), always installed;
+#                         --network also applies them: Wi-Fi access point VMX-<team> at 10.XX.YY.2 and the wired port at
+#                         172.22.11.2 (needs NetworkManager; refuses when it would cut the ssh session you are using)
+#   8. sudoers (opt-in)   lets the login user run the few sudo commands `gradlew deploy` uses, without a password
 #
 # NOT VERIFIED on a real VMX-pi: the commands in steps 2 and 3 and the systemd unit were only
 # syntax-checked and dry-run on a PC. See allwpilib/simulation/halsim_vmx/HARDWARE_CHECKLIST.md.
@@ -44,6 +49,13 @@ UPGRADE_DRIVERS=0
 SKIP_PLUGIN=0
 SKIP_SHIM=0
 SKIP_LSE_EMU=0
+SKIP_CPU_MAX=0
+APPLY_NETWORK=0
+FORCE_NETWORK=0
+AP_SSID=VMX
+AP_TEAM=1234
+AP_BAND=2.4
+AP_PASSWORD=password
 ROBOT_HOME=""
 LOGIN_USER=""
 # Defaults: this repo is where install.sh is; allwpilib is a sibling checkout (or inside this directory).
@@ -65,6 +77,16 @@ Options:
   --skip-plugin            do not build the Studica backend plugin
   --skip-shim              do not build the GPIO interrupt shim (libvmx_gpio_isr_shim.so)
   --skip-lse-emu           do not build the LSE atomics emulation (libvmx_lse_emu.so)
+  --skip-cpu-max           do not pin the CPU at its highest frequency (robot_cpu_max.service)
+  --network                also set up the network like the Studica VMX image: the Wi-Fi becomes an access point
+                           (VMX-<team>, 10.XX.YY.2) and the wired port is fixed at 172.22.11.2. Without it only the
+                           commands (setupHotspot, toggleNetMode, setupEthernet) are installed and nothing is changed.
+  --team N                 team number for --network (default 1234 -> SSID VMX-1234, 10.12.34.2)
+  --ap-ssid PREFIX         SSID prefix for --network (default VMX)
+  --ap-band 2.4|5          Wi-Fi band for --network (default 2.4, channel 1)
+  --ap-password PASSWORD   Wi-Fi password for --network (default: the VMX image default; visible in the process list while
+                           install.sh runs, so use setupHotspot afterwards for a private one)
+  --force-network          apply --network even if this ssh session comes in over the Wi-Fi/wired port it changes
   --dry-run                print what would be done, change nothing
   -h, --help               this text
 EOF
@@ -89,6 +111,13 @@ while [ $# -gt 0 ]; do
     --skip-plugin) SKIP_PLUGIN=1 ;;
     --skip-shim) SKIP_SHIM=1 ;;
     --skip-lse-emu) SKIP_LSE_EMU=1 ;;
+    --skip-cpu-max) SKIP_CPU_MAX=1 ;;
+    --network) APPLY_NETWORK=1 ;;
+    --force-network) FORCE_NETWORK=1 ;;
+    --ap-ssid) [ $# -ge 2 ] || die "--ap-ssid needs a value"; AP_SSID="$2"; shift ;;
+    --team) [ $# -ge 2 ] || die "--team needs a value"; AP_TEAM="$2"; shift ;;
+    --ap-band) [ $# -ge 2 ] || die "--ap-band needs a value"; AP_BAND="$2"; shift ;;
+    --ap-password) [ $# -ge 2 ] || die "--ap-password needs a value"; AP_PASSWORD="$2"; shift ;;
     --dry-run) DRY_RUN=1 ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; die "unknown argument: $1" ;;
@@ -253,6 +282,65 @@ install_lse_emu() {
   fi
 }
 
+install_cpu_max() {
+  info "CPU at full speed"
+  if [ "$SKIP_CPU_MAX" = 1 ]; then echo "  skipped (--skip-cpu-max)"; return; fi
+  local src="$RM_DIR/system"
+  [ -f "$src/robot_cpu_max.sh" ] && [ -f "$src/robot_cpu_max.service" ] || { warn "$src/robot_cpu_max.* not found; skipping"; return; }
+  if ! ls /sys/devices/system/cpu/cpu0/cpufreq >/dev/null 2>&1; then
+    echo "  this kernel exposes no cpufreq: nothing to set"; return
+  fi
+
+  run install -d "$OPT_DIR/bin"
+  run install -m 0755 "$src/robot_cpu_max.sh" "$OPT_DIR/bin/robot_cpu_max.sh"
+  run install -m 0644 "$src/robot_cpu_max.service" /etc/systemd/system/robot_cpu_max.service
+  # Ubuntu's ondemand.service sets the governor to "ondemand" a minute after every boot and would undo this.
+  if systemctl list-unit-files ondemand.service 2>/dev/null | grep -q '^ondemand.service'; then
+    run systemctl disable ondemand.service
+    run systemctl mask ondemand.service
+  fi
+  run systemctl daemon-reload
+  run systemctl enable robot_cpu_max.service
+  run systemctl restart robot_cpu_max.service      # also applies it now
+  if [ "$DRY_RUN" != 1 ]; then
+    for cpu in /sys/devices/system/cpu/cpu[0-9]*/cpufreq; do
+      echo "  $(basename "$(dirname "$cpu")"): $(cat "$cpu/scaling_governor") $(cat "$cpu/scaling_min_freq")-$(cat "$cpu/scaling_max_freq") kHz"
+    done
+  fi
+}
+
+install_network() {
+  info "Network (Wi-Fi access point and fixed wired address)"
+  local src="$RM_DIR/net/vmx_net.py"
+  [ -f "$src" ] || { warn "$src not found; skipping the network commands"; return; }
+  run install -d "$OPT_DIR/net"
+  run install -m 0755 "$src" "$OPT_DIR/net/vmx_net.py"
+  local cmd
+  for cmd in setupHotspot toggleNetMode setupEthernet; do
+    run ln -sf "$OPT_DIR/net/vmx_net.py" "/usr/local/bin/$cmd"
+  done
+  echo "  installed: setupHotspot, toggleNetMode, setupEthernet"
+
+  if [ "$APPLY_NETWORK" != 1 ]; then
+    echo "  network left as it is (add --network, or: sudo setupHotspot VMX 1234 2.4 password; sudo setupEthernet)"
+    return
+  fi
+  if [ "$DRY_RUN" != 1 ]; then
+    if ! systemctl is-active --quiet NetworkManager; then
+      warn "NetworkManager is not running, so the network was not changed (sudo apt install -y network-manager dnsmasq-base)"; return
+    fi
+    if ! command -v dnsmasq >/dev/null 2>&1; then
+      warn "dnsmasq is missing, NetworkManager cannot hand out addresses: sudo apt install -y dnsmasq-base"; return
+    fi
+  fi
+  local force=()
+  [ "$FORCE_NETWORK" = 1 ] && force=(--force)
+  # The wired port first: it is the way back in if the Wi-Fi change goes wrong.
+  run "$OPT_DIR/net/vmx_net.py" setupEthernet "${force[@]}"
+  run "$OPT_DIR/net/vmx_net.py" setupHotspot "${force[@]}" "$AP_SSID" "$AP_TEAM" "$AP_BAND" "$AP_PASSWORD"
+  echo "  the VMX is 172.22.11.2 on the wired port and $(python3 -c "import sys; t=int(sys.argv[1]); print('10.%d.%d.2' % (t//100, t%100))" "$AP_TEAM") on the Wi-Fi '$AP_SSID-$AP_TEAM'"
+}
+
 # Last, so robot_manager starts with every library in place: it looks for the LSE emulation library when it starts.
 restart_service() {
   info "Restarting $SERVICE"
@@ -291,6 +379,8 @@ summary() {
   plugin:    $PLUGIN_DIR/libhalsim_vmx_studica.so   -> HALSIMVMX_BACKEND
   shim:      $OPT_DIR/lib/libvmx_gpio_isr_shim.so   -> LD_PRELOAD (only on kernels without /sys/class/gpio)
   lse emu:   $OPT_DIR/lib/libvmx_lse_emu.so   -> LD_AUDIT, set by robot_manager on CPUs without LSE atomics
+  cpu:       systemctl status robot_cpu_max      (governor performance, at every boot)
+  network:   setupHotspot SSID TEAM BAND [PASSWORD], toggleNetMode ap|wifi, setupEthernet   (add --network to apply)
 Next: allwpilib/simulation/halsim_vmx/HARDWARE_CHECKLIST.md (section 1 onward). Nothing here has been run on a VMX yet.
 EOF
 }
@@ -310,6 +400,8 @@ install_drivers
 install_plugin
 install_shim
 install_lse_emu
+install_cpu_max
+install_network
 install_sudoers
 restart_service
 summary

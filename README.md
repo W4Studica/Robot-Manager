@@ -42,6 +42,34 @@ WPILib이 `linuxarm64`로 배포하는 `libMrcLib.so`(Driver Station/로봇 통�
 
 `robot_manager`는 로봇 프로그램을 `SIGINT` -> `SIGTERM` -> `SIGKILL` 순서로 멈춘다(`stop_signals`). 프로그램이 `SIGKILL`로 죽으면(`stop_grace_seconds` 안에 안 끝났을 때, 또는 누군가 `kill -9` 했을 때) pigpio가 GPU 메모리를 정리하지 못해서 **새어 나가고**, 몇 번 쌓이면 다음 시작이 `initMboxBlock: init mbox zaps failed`로 실패한다(로봇에서 측정). 재부팅하면 풀린다. 모터는 이 경우에도 멈춘다: `TitanEnableGuard`/`StudicaTitan`(allwpilib `halsim_vmx`)이 enable 프레임을 반복 송신에 맡기지 않아서, 프로그램이 죽으면 Titan이 200 ms 안에 스스로 멈춘다.
 
+## 네트워크 (`net/`, Studica VMX 이미지와 같은 방식)
+
+대회처럼 개발 PC가 로봇에 직접 붙을 수 있게 한다. 명령 이름과 사용법은 Studica VMX 이미지의 것과 같다.
+
+| 방식 | VMX의 주소 | 설명 |
+|---|---|---|
+| **Wi-Fi AP** (기본) | **`10.XX.YY.2`** (팀 1234 -> `10.12.34.2`, 4444 -> `10.44.44.2`) | VMX가 AP와 DHCP 서버가 된다. 이미지 기본값: SSID `VMX-1234`, 비밀번호 `password`, 2.4GHz, 채널 1 |
+| **유선** (항상 켜짐) | **`172.22.11.2`** (고정) | 직접 연결한 PC는 VMX의 DHCP로 `172.22.11.XX`를 받는다. 되도록 유선을 쓴다 |
+| Wi-Fi 클라이언트 | 공유기가 줌 | AP를 끄고 공유기에 접속. 업데이트/패키지 다운로드용 |
+
+```bash
+sudo setupHotspot VMX 1234 2.4 password          # SSID접두사 팀번호 밴드 [비밀번호]; 채널은 물어본다(--channel N)
+sudo setupHotspot TestRobot 4444 2.4 Checkers    # TestRobot-4444, 10.44.44.2
+sudo toggleNetMode wifi HomeRouter routerpass    # 공유기에 접속 (AP는 꺼짐; 이후 `toggleNetMode wifi`만으로 다시)
+sudo toggleNetMode ap                            # 다시 AP
+sudo setupEthernet                               # 유선 172.22.11.2 (DHCP 서버 포함)
+```
+
+`install.sh`는 이 명령들을 항상 설치하고, **`--network`를 줄 때만** 적용한다(`--team`, `--ap-ssid`, `--ap-band`, `--ap-password`로 값 변경).
+NetworkManager(`shared` 모드, `dnsmasq-base` 필요)로 동작하며 연결 파일은 `/etc/NetworkManager/system-connections/robot-*.nmconnection`(모드 0600, 비밀번호는 명령줄에 나오지 않는다)에 쓴다.
+
+**주의: 무선으로 SSH 중이면 Wi-Fi를 AP로 바꾸는 순간 연결이 끊긴다.** 그래서 지금 세션이 바꿀 인터페이스로 들어오고 있으면 명령이 **거부**한다(유선 쪽도 마찬가지). 유선이나 화면/키보드로 접속해서 하거나 `--force`(`install.sh`는 `--force-network`)를 준다.
+PC에서만 테스트했다(NetworkManager를 흉내 낸 단위 테스트 30개: 팀 번호->주소, 키파일 내용, 채널 검증, 접속 끊김 방지, 모드 전환). **로봇에서는 아직 실행해 보지 않았다.** 로봇의 네트워크 구성은 `system/network_probe.sh`(읽기 전용)로 먼저 확인한다.
+
+## CPU 최대 성능 (`system/`)
+
+`install.sh`가 `robot_cpu_max.service`를 설치해서 부팅마다 CPU governor를 `performance`로, 최소 주파수를 최대로 올린다(20 ms 루프가 클럭이 올라오길 기다리지 않게). Ubuntu의 `ondemand.service`는 부팅 1분 뒤에 이를 되돌리므로 끈다. `--skip-cpu-max`로 건너뛴다. 오버클럭은 하지 않는다.
+
 ## deploy와의 관계
 
 deploy는 **GradleRIO가 SSH로 직접** 한다(2027과 동일). `robot_manager`는 deploy에 관여하지 않고 결과물만 실행한다.
