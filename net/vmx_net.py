@@ -1,25 +1,28 @@
 #!/usr/bin/env python3
 """VMX networking, the way Studica's VMX image does it: setupHotspot and toggleNetMode.
 
-  setupHotspot [--channel N] [--force] [--no-activate] SSID TEAMNUMBER BAND [PASSWORD]
+  setupHotspot [--channel N] [--no-activate] SSID TEAMNUMBER BAND [PASSWORD]
       Wi-Fi access point. SSID is a prefix: SSID "VMX" and team 1234 give the network "VMX-1234". BAND is 2.4 or 5.
       The VMX is 10.XX.YY.2 on it (team 1234 -> 10.12.34.2) and hands out addresses to the computers that join.
       Defaults of the VMX image: setupHotspot VMX 1234 2.4 password   (channel 6)
-  toggleNetMode ap | wifi [SSID PASSWORD] [--force]
+  toggleNetMode ap | wifi [SSID PASSWORD]
       ap: Wi-Fi is the access point.  wifi: the access point is off and the VMX joins a router (updates, packages).
-  setupEthernet [--force] [--no-activate] [IFACE]
+  setupEthernet [--no-activate] [IFACE]
       The wired port is always 172.22.11.2 and hands out 172.22.11.X addresses (a computer plugged in directly).
   vmx_net.py status
 
-Everything is done through NetworkManager keyfiles. Nothing is run that could cut a Wi-Fi SSH session without --force.
+Everything is done through NetworkManager keyfiles. A change that cuts the ssh session it is run from is made a few seconds later by the robot itself (systemd-run), so it
+still happens after the session is gone.
 Standard library only.
 """
 
 import argparse
 import os
 import re
+import shlex
 import subprocess
 import sys
+import time
 import uuid
 
 NM_DIR = os.environ.get("VMX_NM_DIR", "/etc/NetworkManager/system-connections")
@@ -265,26 +268,31 @@ def ssh_arrives_through(system, interface):
     return bool(m) and m.group(1) == interface
 
 
-def guard_ssh(system, interface, force, what):
-    if not force and ssh_arrives_through(system, interface):
-        raise NetError(
-            "you are connected over %s: %s would cut this session (and you could not get back in by Wi-Fi). Connect through "
-            "the wired port or a screen and keyboard, or run it again with --force." % (interface, what))
+DEFER_SECONDS = 3
 
 
-def reload_connection(system, name):
-    system.run(["nmcli", "connection", "reload"])
-    system.run(["nmcli", "connection", "up", name], check=False)
+def activate(system, interface, steps):
+    """Runs the nmcli steps [(args, check), ...]. If the ssh session this is run from comes in over `interface`, the change
+    would cut it: the steps then run DEFER_SECONDS later in a systemd unit of their own, which does not depend on the
+    session. Returns True if they were deferred."""
+    if ssh_arrives_through(system, interface):
+        script = "; ".join(" ".join(shlex.quote(a) for a in args) for args, _ in steps)
+        system.run(["systemd-run", "--unit=w4studica-net-%d" % int(time.time()), "--on-active=%d" % DEFER_SECONDS,
+                    "--description=W4Studica: apply the network change", "/bin/sh", "-c", script])
+        return True
+    for args, check in steps:
+        system.run(args, check=check)
+    return False
 
 
 # ---- commands ---------------------------------------------------------------------------------------------------------
 
-def setup_hotspot(system, ssid_prefix, team, band, password, channel=None, force=False, activate=True):
-    """activate=False only writes the NetworkManager connection file (NetworkManager need not be installed yet); the
+def setup_hotspot(system, ssid_prefix, team, band, password, channel=None, force=False, apply=True):
+    """apply=False only writes the NetworkManager connection file (NetworkManager need not be installed yet); the
     connection comes up when NetworkManager starts."""
     if not system.is_root():
         raise NetError("run it with sudo")
-    if activate and not network_manager_active(system):
+    if apply and not network_manager_active(system):
         raise NetError("NetworkManager is not running; this needs it (see install.sh --network)")
     team_to_address(team)  # validates the team number before anything else uses it
     nm_band = band_to_nm(band)
@@ -303,31 +311,28 @@ def setup_hotspot(system, ssid_prefix, team, band, password, channel=None, force
             channel = default_channel(channels)
     if channel not in channels:
         raise NetError("channel %d is not valid for %s GHz here; valid: %s" % (channel, band, ", ".join(map(str, channels))))
-    if activate:
-        guard_ssh(system, interface, force, "turning the Wi-Fi into an access point")
 
     ssid = ssid_for(ssid_prefix, team)
     path = os.path.join(NM_DIR, AP_NAME + ".nmconnection")
     system.write_secret(path, ap_keyfile(ssid, team, nm_band, channel, password, interface,
                                          connection_uuid=system.read_uuid(path)))
-    if activate:
-        reload_connection(system, AP_NAME)
-    return {"ssid": ssid, "address": team_to_address(team), "band": nm_band, "channel": channel, "interface": interface}
+    deferred = apply and activate(system, interface, [(["nmcli", "connection", "reload"], True),
+                                                      (["nmcli", "connection", "up", AP_NAME], False)])
+    return {"ssid": ssid, "address": team_to_address(team), "band": nm_band, "channel": channel, "interface": interface,
+            "deferred": deferred}
 
 
-def setup_ethernet(system, interface=None, force=False, activate=True):
+def setup_ethernet(system, interface=None, force=False, apply=True):
     if not system.is_root():
         raise NetError("run it with sudo")
-    if activate and not network_manager_active(system):
+    if apply and not network_manager_active(system):
         raise NetError("NetworkManager is not running")
     interface = interface or ethernet_interface(system)
-    if activate:
-        guard_ssh(system, interface, force, "fixing the wired port at 172.22.11.2")
     path = os.path.join(NM_DIR, ETH_NAME + ".nmconnection")
     system.write_secret(path, ethernet_keyfile(interface))
-    if activate:
-        system.run(["nmcli", "connection", "reload"])
-    return {"interface": interface, "address": ETH_ADDRESS}
+    deferred = apply and activate(system, interface, [(["nmcli", "connection", "reload"], True),
+                                                      (["nmcli", "connection", "up", ETH_NAME], False)])
+    return {"interface": interface, "address": ETH_ADDRESS, "deferred": deferred}
 
 
 def _wifi_connections(system):
@@ -351,16 +356,13 @@ def toggle_net_mode(system, mode, ssid=None, password=None, force=False):
     if mode == "ap":
         if not system.exists(path):
             raise NetError("no access point is set up yet: sudo setupHotspot VMX 1234 2.4 password")
-        guard_ssh(system, interface, force, "switching the Wi-Fi to the access point")
         system.run(["nmcli", "connection", "modify", AP_NAME, "connection.autoconnect", "yes"])
         for name in _wifi_connections(system):
             if name != AP_NAME:
                 system.run(["nmcli", "connection", "modify", name, "connection.autoconnect", "no"], check=False)
-        system.run(["nmcli", "connection", "up", AP_NAME])
-        return {"mode": "ap"}
+        return {"mode": "ap", "deferred": activate(system, interface, [(["nmcli", "connection", "up", AP_NAME], True)])}
 
     # wifi: join a router
-    guard_ssh(system, interface, force, "leaving the access point")
     if ssid:
         client_path = os.path.join(NM_DIR, CLIENT_NAME + ".nmconnection")
         if password:
@@ -376,8 +378,8 @@ def toggle_net_mode(system, mode, ssid=None, password=None, force=False):
     if system.exists(path):
         system.run(["nmcli", "connection", "modify", AP_NAME, "connection.autoconnect", "no"], check=False)
     system.run(["nmcli", "connection", "modify", client, "connection.autoconnect", "yes"], check=False)
-    system.run(["nmcli", "connection", "up", client])
-    return {"mode": "wifi", "connection": client}
+    deferred = activate(system, interface, [(["nmcli", "connection", "up", client], True)])
+    return {"mode": "wifi", "connection": client, "deferred": deferred}
 
 
 def status(system):
@@ -385,6 +387,12 @@ def status(system):
 
 
 # ---- command line -----------------------------------------------------------------------------------------------------
+
+def deferred_notice(info):
+    if info.get("deferred"):
+        print("This ssh session ends in %d seconds: the change is made by the robot itself, whatever happens to the session. "
+              "Reconnect through the new network." % DEFER_SECONDS)
+
 
 def main(argv=None, system=None):
     system = system or System()
@@ -397,15 +405,15 @@ def main(argv=None, system=None):
 
     p = sub.add_parser("setupHotspot", help="make the Wi-Fi an access point")
     p.add_argument("ssid"); p.add_argument("team"); p.add_argument("band"); p.add_argument("password", nargs="?", default=None)
-    p.add_argument("--channel", type=int); p.add_argument("--force", action="store_true")
+    p.add_argument("--channel", type=int); p.add_argument("--force", action="store_true", help="not needed any more (accepted for old scripts)")
     p.add_argument("--no-activate", action="store_true", help="only write the connection file (install.sh uses it)")
 
     p = sub.add_parser("toggleNetMode", help="ap | wifi")
     p.add_argument("mode"); p.add_argument("ssid", nargs="?"); p.add_argument("password", nargs="?")
-    p.add_argument("--force", action="store_true")
+    p.add_argument("--force", action="store_true", help="not needed any more (accepted for old scripts)")
 
     p = sub.add_parser("setupEthernet", help="the wired port: 172.22.11.2 with a DHCP server")
-    p.add_argument("interface", nargs="?"); p.add_argument("--force", action="store_true")
+    p.add_argument("interface", nargs="?"); p.add_argument("--force", action="store_true", help="not needed any more (accepted for old scripts)")
     p.add_argument("--no-activate", action="store_true", help="only write the connection file (install.sh uses it)")
 
     sub.add_parser("status")
@@ -415,15 +423,18 @@ def main(argv=None, system=None):
         if args.command == "setupHotspot":
             password = args.password if args.password is not None else DEFAULTS["password"]
             info = setup_hotspot(system, args.ssid, args.team, args.band, password, args.channel, args.force,
-                                 activate=not args.no_activate)
+                                 apply=not args.no_activate)
             print("Wi-Fi access point '%s' on %s (channel %d): the VMX is %s" % (
                 info["ssid"], info["interface"], info["channel"], info["address"]))
+            deferred_notice(info)
         elif args.command == "toggleNetMode":
             info = toggle_net_mode(system, args.mode, args.ssid, args.password, args.force)
             print("network mode: %s" % info["mode"])
+            deferred_notice(info)
         elif args.command == "setupEthernet":
-            info = setup_ethernet(system, args.interface, args.force, activate=not args.no_activate)
+            info = setup_ethernet(system, args.interface, args.force, apply=not args.no_activate)
             print("wired port %s: %s with a DHCP server" % (info["interface"], info["address"]))
+            deferred_notice(info)
         elif args.command == "sshdevice":
             print(ssh_device(system))
         else:

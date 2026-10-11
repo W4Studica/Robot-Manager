@@ -206,16 +206,25 @@ class HotspotTest(NetTestCase):
         with self.assertRaises(net.NetError):
             net.setup_hotspot(FakeSystem(nm_active=False), "VMX", 1234, "2.4", "password")
 
-    def test_refuses_to_cut_a_wifi_ssh_session(self):
+    def test_a_change_that_cuts_the_ssh_session_is_made_by_the_robot_a_few_seconds_later(self):
         system = FakeSystem(ssh_connection="192.168.0.220 5555 192.168.0.222 22", route_dev="wlan0")
-        with self.assertRaises(net.NetError) as ctx:
-            net.setup_hotspot(system, "VMX", 1234, "2.4", "password")
-        self.assertIn("wlan0", str(ctx.exception))
-        self.assertFalse(os.path.exists(self.path("robot-ap")))
-        # --force, or a session over the wired port, is fine
-        net.setup_hotspot(system, "VMX", 1234, "2.4", "password", force=True)
+        info = net.setup_hotspot(system, "VMX", 1234, "5", "password", channel=36)
+        self.assertTrue(info["deferred"])
+        self.assertIn("channel=36", self.read("robot-ap"))
+        self.assertFalse(any(r[:3] == ["nmcli", "connection", "up"] for r in system.runs))   # not now, in the session
+        unit = [r for r in system.runs if r[0] == "systemd-run"]
+        self.assertEqual(len(unit), 1)
+        self.assertIn("--on-active=3", unit[0])
+        self.assertEqual(unit[0][-3:-1], ["/bin/sh", "-c"])
+        self.assertEqual(unit[0][-1], "nmcli connection reload; nmcli connection up robot-ap")
+        # a session over the wired port is not cut: it is applied at once
         other = FakeSystem(ssh_connection="172.22.11.5 5555 172.22.11.2 22", route_dev="eth0")
-        net.setup_hotspot(other, "VMX", 1234, "2.4", "password")
+        self.assertFalse(net.setup_hotspot(other, "VMX", 1234, "2.4", "password")["deferred"])
+        self.assertIn(["nmcli", "connection", "up", "robot-ap"], other.runs)
+        self.assertFalse(any(r[0] == "systemd-run" for r in other.runs))
+
+    def test_the_old_force_flag_is_still_accepted(self):
+        self.assertEqual(net.main(["setupHotspot", "--force", "VMX", "1234", "2.4"], FakeSystem()), 0)
 
 
 class BeforeNetworkManagerTest(NetTestCase):
@@ -229,8 +238,8 @@ class BeforeNetworkManagerTest(NetTestCase):
     def test_no_activate_only_writes_the_files(self):
         system = FakeSystem(nm_active=False, nmcli_missing=True,
                             ssh_connection="192.168.0.220 5555 192.168.0.222 22", route_dev="wlan0")
-        net.setup_ethernet(system, activate=False)
-        info = net.setup_hotspot(system, "VMX", 1234, "2.4", "password", activate=False)
+        net.setup_ethernet(system, apply=False)
+        info = net.setup_hotspot(system, "VMX", 1234, "2.4", "password", apply=False)
         self.assertEqual(info["address"], "10.12.34.2")
         self.assertIn("address1=172.22.11.2/24", self.read("robot-eth"))
         self.assertIn("ssid=VMX-1234", self.read("robot-ap"))
@@ -285,14 +294,13 @@ class EthernetTest(NetTestCase):
         self.assertEqual((info["interface"], info["address"]), ("eth0", "172.22.11.2/24"))
         self.assertIn("address1=172.22.11.2/24", self.read("robot-eth"))
 
-    def test_refuses_to_cut_a_wired_ssh_session_unless_forced(self):
+    def test_a_wired_ssh_session_is_cut_by_the_robot_itself_later(self):
         wired_ssh = dict(ssh_connection="192.168.0.220 5555 192.168.0.222 22", route_dev="eth0")
-        with self.assertRaises(net.NetError):
-            net.setup_ethernet(FakeSystem(**wired_ssh))
-        self.assertFalse(os.path.exists(self.path("robot-eth")))
-        net.setup_ethernet(FakeSystem(**wired_ssh), force=True)
+        system = FakeSystem(**wired_ssh)
+        self.assertTrue(net.setup_ethernet(system)["deferred"])
+        self.assertTrue(any(r[0] == "systemd-run" for r in system.runs))
         # a session over Wi-Fi does not touch the wired port
-        net.setup_ethernet(FakeSystem(ssh_connection="192.168.0.220 5555 192.168.0.222 22", route_dev="wlan0"))
+        self.assertFalse(net.setup_ethernet(FakeSystem(ssh_connection="192.168.0.220 5555 192.168.0.222 22", route_dev="wlan0"))["deferred"])
 
     def test_an_interface_can_be_named(self):
         net.setup_ethernet(FakeSystem(), "end0")
@@ -338,13 +346,15 @@ class ToggleTest(NetTestCase):
         with self.assertRaises(net.NetError):
             net.toggle_net_mode(FakeSystem(), "bridge")
 
-    def test_both_directions_refuse_to_cut_a_wifi_ssh_session(self):
+    def test_both_directions_are_deferred_over_a_wifi_ssh_session(self):
         net.setup_hotspot(FakeSystem(), "VMX", 1234, "2.4", "password")
         wifi_ssh = dict(ssh_connection="192.168.0.220 5555 192.168.0.222 22", route_dev="wlan0")
-        with self.assertRaises(net.NetError):
-            net.toggle_net_mode(FakeSystem(**wifi_ssh), "ap")
-        with self.assertRaises(net.NetError):
-            net.toggle_net_mode(FakeSystem(wifi_connections=["Home"], **wifi_ssh), "wifi")
+        system = FakeSystem(**wifi_ssh)
+        self.assertTrue(net.toggle_net_mode(system, "ap")["deferred"])
+        self.assertFalse(any(r[:3] == ["nmcli", "connection", "up"] for r in system.runs))
+        system = FakeSystem(wifi_connections=["Home"], **wifi_ssh)
+        self.assertTrue(net.toggle_net_mode(system, "wifi")["deferred"])
+        self.assertIn("nmcli connection up Home", [r for r in system.runs if r[0] == "systemd-run"][0][-1])
 
 
 class CommandLineTest(NetTestCase):

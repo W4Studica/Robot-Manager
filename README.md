@@ -70,6 +70,7 @@ sudo setupEthernet                               # 유선 172.22.11.2 (DHCP 서�
 5. 다시 접속: **랜선**(PC를 DHCP로 두면 `172.22.11.X`를 받음) `ssh <사용자>@172.22.11.2`, 또는 **Wi-Fi AP** `VMX-1234`(비밀번호 `password`)에 붙어서 `ssh <사용자>@10.12.34.2`.
 
 무선이나 유선으로 SSH 중이면 `--force-network` 없이는 거부한다(세션이 끊기기 때문; `sudo`가 환경변수를 지워도 부모 프로세스에서 찾는다). **되돌리기:** 로봇의 화면과 키보드에서 `sudo /opt/robot_manager/bin/undo_network.sh`(또는 `install.sh --undo-network`)가 netplan 파일을 복구하고 `systemd-networkd`를 되살린다.
+`setupHotspot`·`toggleNetMode`·`setupEthernet`은 접속 중인 SSH 세션을 끊을 변경이어도 거부하지 않는다: 로봇이 3초 뒤 `systemd-run`으로 직접 적용하므로 세션이 끊겨도 변경은 끝까지 된다(`--force`는 필요 없음, 받기만 한다). 끊기면 새 네트워크로 다시 접속한다.
 `setupHotspot`/`setupEthernet`의 `--no-activate`는 연결 파일만 쓰고 아무것도 켜지 않는다(`install.sh`가 사용). NetworkManager의 `shared` 모드로 동작하며 비밀번호는 명령줄에 나오지 않는다.
 **PC에서만 테스트했다**(NetworkManager를 흉내 낸 단위 테스트 39개 + `install.sh --dry-run`). **로봇에서는 아직 실행하지 않았다.** 로봇의 현재 구성은 `system/network_probe.sh`(읽기 전용)로 확인한다(2026-10-11 개발용 로봇: systemd-networkd + netplan, NetworkManager/hostapd/dnsmasq/iw 없음).
 
