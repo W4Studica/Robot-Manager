@@ -25,6 +25,11 @@ with respect to every other thread. **Not** emulated: `CASP`, `LDAPR` and anythi
 Cost: one signal round trip (microseconds) per emulated instruction. Fine for start-up, shutdown and occasional use;
 a library that executes millions of such instructions per second would slow down.
 
+## Cost (`make bench`)
+
+`make bench` prints how long one emulated `ldaddal` / `casal` / `swpal` takes compared with a plain atomic add, on one thread and
+on all CPUs at once. Run it on the robot (under qemu the numbers mean nothing).
+
 ## Tests (`make test`)
 
 * all 224 instruction forms against a C model (memory result, returned old value, no write past the operand),

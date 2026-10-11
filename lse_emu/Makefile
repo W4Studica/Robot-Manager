@@ -21,7 +21,14 @@ test_lse_emu: test_lse_emu.c libfake_mrclib.so $(LIB)
 test: test_lse_emu
 	LD_AUDIT=$(CURDIR)/$(LIB) $(RUN) ./test_lse_emu
 
-clean:
-	rm -f $(LIB) libfake_mrclib.so test_lse_emu
+bench_lse_emu: bench_lse_emu.c
+	$(CC) -O2 -Wall -Wextra -march=armv8-a -mno-outline-atomics -o $@ bench_lse_emu.c -lpthread
 
-.PHONY: all test clean
+# Cost of one emulated instruction (run it on the robot; the numbers under qemu mean nothing).
+bench: bench_lse_emu $(LIB)
+	LD_AUDIT=$(CURDIR)/$(LIB) $(RUN) ./bench_lse_emu
+
+clean:
+	rm -f $(LIB) libfake_mrclib.so test_lse_emu bench_lse_emu
+
+.PHONY: all test bench clean
