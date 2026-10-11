@@ -285,6 +285,19 @@ def activate(system, interface, steps):
     return False
 
 
+def reload_steps(system, name, keep_uuid):
+    """The nmcli steps that load a connection file and bring it up. A profile of the same name under another uuid (a
+    leftover of an earlier setup) is deleted, and the connection is brought up by its uuid: by name, NetworkManager
+    would pick either of them and could start the old settings."""
+    steps = [(["nmcli", "connection", "reload"], True)]
+    for line in system.run(["nmcli", "-t", "-f", "NAME,UUID", "connection", "show"], check=False).splitlines():
+        profile, _, other = line.rpartition(":")
+        if profile == name and other != keep_uuid:
+            steps.append((["nmcli", "connection", "delete", "uuid", other], False))
+    steps.append((["nmcli", "connection", "up", "uuid", keep_uuid], False))
+    return steps
+
+
 # ---- commands ---------------------------------------------------------------------------------------------------------
 
 def setup_hotspot(system, ssid_prefix, team, band, password, channel=None, force=False, apply=True):
@@ -314,10 +327,9 @@ def setup_hotspot(system, ssid_prefix, team, band, password, channel=None, force
 
     ssid = ssid_for(ssid_prefix, team)
     path = os.path.join(NM_DIR, AP_NAME + ".nmconnection")
-    system.write_secret(path, ap_keyfile(ssid, team, nm_band, channel, password, interface,
-                                         connection_uuid=system.read_uuid(path)))
-    deferred = apply and activate(system, interface, [(["nmcli", "connection", "reload"], True),
-                                                      (["nmcli", "connection", "up", AP_NAME], False)])
+    connection_uuid = system.read_uuid(path) or str(uuid.uuid4())
+    system.write_secret(path, ap_keyfile(ssid, team, nm_band, channel, password, interface, connection_uuid=connection_uuid))
+    deferred = apply and activate(system, interface, reload_steps(system, AP_NAME, connection_uuid))
     return {"ssid": ssid, "address": team_to_address(team), "band": nm_band, "channel": channel, "interface": interface,
             "deferred": deferred}
 
@@ -329,9 +341,9 @@ def setup_ethernet(system, interface=None, force=False, apply=True):
         raise NetError("NetworkManager is not running")
     interface = interface or ethernet_interface(system)
     path = os.path.join(NM_DIR, ETH_NAME + ".nmconnection")
-    system.write_secret(path, ethernet_keyfile(interface))
-    deferred = apply and activate(system, interface, [(["nmcli", "connection", "reload"], True),
-                                                      (["nmcli", "connection", "up", ETH_NAME], False)])
+    connection_uuid = system.read_uuid(path) or str(uuid.uuid4())
+    system.write_secret(path, ethernet_keyfile(interface, connection_uuid=connection_uuid))
+    deferred = apply and activate(system, interface, reload_steps(system, ETH_NAME, connection_uuid))
     return {"interface": interface, "address": ETH_ADDRESS, "deferred": deferred}
 
 

@@ -24,7 +24,7 @@ class FakeSystem(net.System):
     """Records the commands and answers them from a table; files go to a temporary directory."""
 
     def __init__(self, nm_active=True, root=True, ssh_connection=None, route_dev="eth0", wifi_connections=(), tty=False,
-                 nmcli_missing=False):
+                 nmcli_missing=False, profiles=()):
         self.runs = []
         self.nm_active = nm_active
         self.root = root
@@ -34,6 +34,7 @@ class FakeSystem(net.System):
         self.tty = tty
         self.answers = []
         self.nmcli_missing = nmcli_missing
+        self.profiles = list(profiles)
 
     def interfaces(self):
         return ["eth0", "lo", "wlan0"]
@@ -49,6 +50,8 @@ class FakeSystem(net.System):
             return "active\n" if self.nm_active else "inactive\n"
         if args[:5] == ["nmcli", "-t", "-f", "DEVICE,TYPE", "device"]:
             return "lo:loopback\neth0:ethernet\nwlan0:wifi\n"
+        if args[:5] == ["nmcli", "-t", "-f", "NAME,UUID", "connection"]:
+            return "".join(p + "\n" for p in self.profiles)
         if args[:5] == ["nmcli", "-t", "-f", "NAME,TYPE", "connection"]:
             return "".join("%s:802-11-wireless\n" % n for n in self.wifi_connections) + "Wired connection 1:802-3-ethernet\n"
         if args[:3] == ["ip", "-o", "route"]:
@@ -149,7 +152,7 @@ class HotspotTest(NetTestCase):
         self.assertIn("ssid=VMX-1234", text)
         self.assertIn("address1=10.12.34.2/24", text)
         self.assertTrue(system.ran("nmcli", "connection", "reload"))
-        self.assertTrue(system.ran("nmcli", "connection", "up", "robot-ap"))
+        self.assertTrue(system.ran("nmcli", "connection", "up", "uuid", system.read_uuid(self.path("robot-ap"))))
 
     def test_the_documented_custom_example(self):
         info = net.setup_hotspot(FakeSystem(), "TestRobot", 4444, "2.4", "Checkers")
@@ -170,7 +173,7 @@ class HotspotTest(NetTestCase):
         with self.assertRaises(net.NetError):
             net.setup_hotspot(system, "VMX", 1234, "2.4", "short")
         self.assertFalse(os.path.exists(self.path("robot-ap")))
-        self.assertFalse(system.ran("nmcli", "connection", "up", "robot-ap"))
+        self.assertFalse(system.ran("nmcli", "connection", "up"))
 
     def test_channel_must_be_valid_for_the_band(self):
         with self.assertRaises(net.NetError):
@@ -216,12 +219,22 @@ class HotspotTest(NetTestCase):
         self.assertEqual(len(unit), 1)
         self.assertIn("--on-active=3", unit[0])
         self.assertEqual(unit[0][-3:-1], ["/bin/sh", "-c"])
-        self.assertEqual(unit[0][-1], "nmcli connection reload; nmcli connection up robot-ap")
+        net_uuid = system.read_uuid(self.path("robot-ap"))
+        self.assertEqual(unit[0][-1], "nmcli connection reload; nmcli connection up uuid " + net_uuid)
         # a session over the wired port is not cut: it is applied at once
         other = FakeSystem(ssh_connection="172.22.11.5 5555 172.22.11.2 22", route_dev="eth0")
         self.assertFalse(net.setup_hotspot(other, "VMX", 1234, "2.4", "password")["deferred"])
-        self.assertIn(["nmcli", "connection", "up", "robot-ap"], other.runs)
+        self.assertIn(["nmcli", "connection", "up", "uuid", other.read_uuid(self.path("robot-ap"))], other.runs)
         self.assertFalse(any(r[0] == "systemd-run" for r in other.runs))
+
+    def test_an_older_profile_of_the_same_name_is_deleted_and_the_new_one_brought_up_by_uuid(self):
+        system = FakeSystem(profiles=["robot-ap:old-uuid", "robot-eth:eth-uuid", "Home:home-uuid"])
+        net.setup_hotspot(system, "VMX", 1234, "2.4", "password")
+        new = system.read_uuid(self.path("robot-ap"))
+        self.assertIn(["nmcli", "connection", "delete", "uuid", "old-uuid"], system.runs)
+        self.assertNotIn(["nmcli", "connection", "delete", "uuid", "eth-uuid"], system.runs)
+        self.assertNotIn(["nmcli", "connection", "delete", "uuid", "home-uuid"], system.runs)
+        self.assertEqual(system.runs[-1], ["nmcli", "connection", "up", "uuid", new])
 
     def test_the_old_force_flag_is_still_accepted(self):
         self.assertEqual(net.main(["setupHotspot", "--force", "VMX", "1234", "2.4"], FakeSystem()), 0)
