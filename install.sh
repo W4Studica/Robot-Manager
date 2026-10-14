@@ -197,7 +197,10 @@ BUILD_CC=gcc
 BUILD_CXX=g++
 ensure_build_dependencies() {
   local need_build=0 need_modern_cpp=0 cpp_standard=""
-  if [ "$SKIP_DRIVERS" != 1 ] || [ "$SKIP_PLUGIN" != 1 ] || [ "$SKIP_SHIM" != 1 ] || [ "$SKIP_LSE_EMU" != 1 ]; then
+  if [ "$SKIP_PLUGIN" != 1 ] || [ "$SKIP_SHIM" != 1 ] || [ "$SKIP_LSE_EMU" != 1 ]; then
+    need_build=1
+  fi
+  if [ "$SKIP_DRIVERS" != 1 ] && { [ "$UPGRADE_DRIVERS" = 1 ] || [ ! -f /usr/local/lib/studica_drivers/libstudica_drivers.so ]; }; then
     need_build=1
   fi
   [ "$need_build" = 1 ] || return 0
