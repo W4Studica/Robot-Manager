@@ -170,8 +170,9 @@ ensure_base_runtime_dependencies() {
   fi
   if [ "$DRY_RUN" != 1 ]; then
     command -v python3 >/dev/null 2>&1 || die "python3 is required (robot_manager is a Python script)"
-    command -v ldd >/dev/null 2>&1 && command -v ldconfig >/dev/null 2>&1 \
-      || die "ldd and ldconfig are required to validate native runtime dependencies"
+    if ! command -v ldd >/dev/null 2>&1 || ! command -v ldconfig >/dev/null 2>&1; then
+      die "ldd and ldconfig are required to validate native runtime dependencies"
+    fi
   fi
 }
 
@@ -184,21 +185,25 @@ c_compiler_works() {  # c_compiler_works <compiler>
     && printf 'int main(void) { return 0; }\n' | "$1" -x c - -o /dev/null >/dev/null 2>&1
 }
 
-cpp_compiler_works() {  # cpp_compiler_works <compiler>
+cpp_compiler_works() {  # cpp_compiler_works <compiler> [standard]
+  local standard="${2:-}"
+  local -a standard_flag=()
+  [ -z "$standard" ] || standard_flag=("-std=$standard")
   command -v "$1" >/dev/null 2>&1 \
-    && printf 'int main() { return 0; }\n' | "$1" -std=c++20 -x c++ - -o /dev/null >/dev/null 2>&1
+    && printf 'int main() { return 0; }\n' | "$1" "${standard_flag[@]}" -x c++ - -o /dev/null >/dev/null 2>&1
 }
 
 BUILD_CC=gcc
 BUILD_CXX=g++
 ensure_build_dependencies() {
-  local need_build=0 need_modern_cpp=0
+  local need_build=0 need_modern_cpp=0 cpp_standard=""
   if [ "$SKIP_DRIVERS" != 1 ] || [ "$SKIP_PLUGIN" != 1 ] || [ "$SKIP_SHIM" != 1 ] || [ "$SKIP_LSE_EMU" != 1 ]; then
     need_build=1
   fi
   [ "$need_build" = 1 ] || return 0
+  [ "$SKIP_PLUGIN" = 1 ] || cpp_standard=c++20
 
-  if ! c_compiler_works gcc || ! cpp_compiler_works g++ || ! command -v make >/dev/null 2>&1; then
+  if ! c_compiler_works gcc || ! cpp_compiler_works g++ "$cpp_standard" || ! command -v make >/dev/null 2>&1; then
     apt_install_packages "the C/C++ build tools" build-essential
   fi
 
@@ -217,8 +222,9 @@ ensure_build_dependencies() {
       apt_install_packages "GCC 11 for the C++20 Studica plugin" build-essential gcc-11 g++-11
     else
       apt_install_packages "GCC 11 for the C++20 Studica plugin" build-essential gcc-11 g++-11
-      command -v gcc-11 >/dev/null 2>&1 && command -v g++-11 >/dev/null 2>&1 \
-        || die "GCC 11 packages installed but gcc-11/g++-11 are unavailable"
+      if ! command -v gcc-11 >/dev/null 2>&1 || ! command -v g++-11 >/dev/null 2>&1; then
+        die "GCC 11 packages installed but gcc-11/g++-11 are unavailable"
+      fi
       BUILD_CC=gcc-11
       BUILD_CXX=g++-11
     fi
@@ -226,7 +232,13 @@ ensure_build_dependencies() {
 
   if [ "$DRY_RUN" != 1 ]; then
     c_compiler_works "$BUILD_CC" || die "$BUILD_CC cannot compile and link a C program; install build-essential and rerun"
-    cpp_compiler_works "$BUILD_CXX" || die "$BUILD_CXX cannot compile and link a C++20 program; install build-essential and rerun"
+    if [ -n "$cpp_standard" ]; then
+      cpp_compiler_works "$BUILD_CXX" "$cpp_standard" \
+        || die "$BUILD_CXX cannot compile and link a C++20 program; install build-essential and rerun"
+    else
+      cpp_compiler_works "$BUILD_CXX" \
+        || die "$BUILD_CXX cannot compile and link a C++ program; install build-essential and rerun"
+    fi
     command -v make >/dev/null 2>&1 || die "make is required to build Studica components"
     if [ "$SKIP_PLUGIN" != 1 ]; then
       major="$(compiler_major "$BUILD_CXX")"
@@ -258,6 +270,7 @@ preflight() {
   info "Robot environment"
   local model=""
   [ -r /proc/device-tree/model ] && model="$(tr -d '\0' < /proc/device-tree/model)"
+  # shellcheck disable=SC1091
   echo "  OS:      $(. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-unknown}")"
   echo "  kernel:  $(uname -r)"
   echo "  model:   ${model:-unknown}"
@@ -265,16 +278,25 @@ preflight() {
   echo "  g++:     $(tool_version g++ --version)"
   echo "  python3: $(tool_version python3 --version)"
   if ! command -v python3 >/dev/null 2>&1; then
-    [ "$DRY_RUN" = 1 ] && warn "python3 is missing; it will be installed before robot_manager starts" \
-      || die "python3 is required (robot_manager is a Python script)"
+    if [ "$DRY_RUN" = 1 ]; then
+      warn "python3 is missing; it will be installed before robot_manager starts"
+    else
+      die "python3 is required (robot_manager is a Python script)"
+    fi
   fi
   if ! command -v systemctl >/dev/null 2>&1; then
-    [ "$DRY_RUN" = 1 ] && warn "systemctl is missing on this host; the dry run cannot validate service operations" \
-      || die "systemd (systemctl) is required on the VMX-pi"
+    if [ "$DRY_RUN" = 1 ]; then
+      warn "systemctl is missing on this host; the dry run cannot validate service operations"
+    else
+      die "systemd (systemctl) is required on the VMX-pi"
+    fi
   fi
   if [ "$(uname -m)" != aarch64 ]; then
-    [ "$DRY_RUN" = 1 ] && warn "dry run is on $(uname -m); real installation/builds require the VMX-pi aarch64 host" \
-      || die "this installer builds VMX aarch64 libraries and must run on aarch64 (found $(uname -m))"
+    if [ "$DRY_RUN" = 1 ]; then
+      warn "dry run is on $(uname -m); real installation/builds require the VMX-pi aarch64 host"
+    else
+      die "this installer builds VMX aarch64 libraries and must run on aarch64 (found $(uname -m))"
+    fi
   fi
 }
 
@@ -550,8 +572,9 @@ apply_network() {
   if [ "$missing" = 1 ]; then
     apt_install_packages "network configuration tools (internet access is required)" network-manager dnsmasq-base iw
     if [ "$DRY_RUN" != 1 ]; then
-      command -v nmcli >/dev/null 2>&1 && command -v iw >/dev/null 2>&1 \
-        || die "network tools are still unavailable; the network was not changed"
+      if ! command -v nmcli >/dev/null 2>&1 || ! command -v iw >/dev/null 2>&1; then
+        die "network tools are still unavailable; the network was not changed"
+      fi
       [ -x /usr/sbin/dnsmasq ] || command -v dnsmasq >/dev/null 2>&1 \
         || die "dnsmasq is still unavailable; the network was not changed"
     fi
