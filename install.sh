@@ -16,7 +16,7 @@
 # What it does (required build dependencies are installed when missing; optional steps have explicit --skip flags):
 #   1. robot_manager      /opt/robot_manager, /etc/robot_manager/config.json (only if missing),
 #                         systemd service robot_manager (enabled and restarted)
-#   2. studica_drivers    built and installed with the Studica Makefile (needs g++, make, VMXPi.h)
+#   2. studica_drivers    built with Studica's Makefile, copied into /usr/local (needs g++, make, VMXPi.h)
 #   3. Studica plugin     /opt/halsim_vmx/libhalsim_vmx_studica.so for halsim_vmx (needs g++ >= 11, VMXPi.h)
 #   4. GPIO interrupt shim /opt/robot_manager/lib/libvmx_gpio_isr_shim.so (needs gcc and make). Fixes
 #                         "RPI GPIO Interrupt Enable: PI_BAD_ISR_INIT" on kernels without GPIO sysfs
