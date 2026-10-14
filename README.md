@@ -124,7 +124,11 @@ sudo ./install.sh --user <deploy할 사용자> --sudoers
 ```
 
 `robot_manager` 설치, `studica_drivers` 빌드/설치, `libhalsim_vmx_studica.so` 빌드(`/opt/halsim_vmx/`), 선택적으로 passwordless sudo(`--sudoers`)를 한다.
-필요한 것(VMXPi.h, g++ 등)이 없으면 그 단계만 건너뛴다. 옵션은 `./install.sh --help`. **실기기 미검증.**
+빌드에 필요한 `build-essential`이 없으면 apt로 설치한다. Studica 플러그인은 C++20을 쓰므로 기본 `g++`가 11보다 오래되면 GCC 11을 추가로 설치해 사용한다. Python 3도 robot_manager 실행에 필요하므로 없으면 설치한다. 패키지 설치를 원하지 않으면 `--no-install-deps`를 주면 되며, 필요한 패키지 목록을 안내하고 종료한다. 필수 VMX SDK 파일이나 소스가 빠진 경우에는 조용히 건너뛰지 않고 오류를 낸다. 의도적으로 구성요소를 제외할 때는 `--skip-*` 옵션을 쓴다.
+
+WPILib/OpenCV는 로봇 OS에 임의 버전을 전역 설치하지 않는다. 로봇 코드가 링크한 네이티브 라이브러리는 GradleRIO가 해당 프로젝트의 WPILib 의존성 버전과 함께 `/home/<user>/wpilib/third-party/lib`에 배포한다. 따라서 OpenCV를 쓰는 프로젝트는 GradleRIO에 OpenCV 네이티브 의존성을 포함해야 한다. 배포 후 `./install.sh --check-runtime-deps --user <사용자>`로 실행 파일과 이 디렉터리의 공유 라이브러리를 검사한다. 누락된 **시스템** 라이브러리만 로봇 OS 패키지로 보완한다. `install.sh`는 로봇에서 직접 빌드하는 Studica 플러그인·드라이버·GPIO shim·LSE 에뮬레이터의 공유 라이브러리도 빌드 직후 검사한다.
+
+네트워크 전환(`--network`)에 필요한 `network-manager`, `dnsmasq-base`, `iw`도 빠져 있으면 apt로 설치한다. 패키지를 설치할 때는 apt 인덱스를 갱신하므로 인터넷 연결이 필요하다. 옵션은 `./install.sh --help`에서 확인한다.
 
 ### 수동으로
 

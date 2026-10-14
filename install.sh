@@ -13,7 +13,7 @@
 # No ssh and no passwords: if it is not started as root it re-runs itself through sudo,
 # which asks for the password itself.
 #
-# What it does (a step is skipped with a message if its requirements are missing):
+# What it does (required build dependencies are installed when missing; optional steps have explicit --skip flags):
 #   1. robot_manager      /opt/robot_manager, /etc/robot_manager/config.json (only if missing),
 #                         systemd service robot_manager (enabled and restarted)
 #   2. studica_drivers    built and installed with the Studica Makefile (needs g++, make, VMXPi.h)
@@ -29,8 +29,8 @@
 #                         172.22.11.2 (needs NetworkManager; refuses when it would cut the ssh session you are using)
 #   8. sudoers (opt-in)   lets the login user run the few sudo commands `gradlew deploy` uses, without a password
 #
-# NOT VERIFIED on a real VMX-pi: the commands in steps 2 and 3 and the systemd unit were only
-# syntax-checked and dry-run on a PC. See allwpilib/simulation/halsim_vmx/HARDWARE_CHECKLIST.md.
+# WPILib/OpenCV native libraries are deployed per robot project by GradleRIO from that project's
+# pinned WPILib dependency graph; this installer does not install a separate system OpenCV version.
 
 set -euo pipefail
 
@@ -43,6 +43,7 @@ BUILD_DIR=/opt/robot_manager/build
 SERVICE=robot_manager
 
 DRY_RUN=0
+INSTALL_DEPS=1
 WITH_SUDOERS=0
 SKIP_DRIVERS=0
 UPGRADE_DRIVERS=0
@@ -53,6 +54,7 @@ SKIP_CPU_MAX=0
 APPLY_NETWORK=0
 FORCE_NETWORK=0
 UNDO_NETWORK=0
+CHECK_RUNTIME_DEPS=0
 AP_SSID=VMX
 AP_TEAM=1234
 AP_BAND=2.4
@@ -73,6 +75,7 @@ Options:
   --robot-manager-dir DIR  Robot-Manager checkout (default: the directory of install.sh)
   --allwpilib-dir DIR      allwpilib checkout (default: ../allwpilib next to this repo)
   --sudoers                allow the login user passwordless sudo for: systemctl (robot_manager), ldconfig, sync
+  --no-install-deps        do not install missing apt packages; fail with the package list instead
   --skip-drivers           do not build/install studica_drivers
   --upgrade-drivers        replace an already installed studica_drivers (e.g. from the vmx-hal package) with this repo's copy
   --skip-plugin            do not build the Studica backend plugin
@@ -90,6 +93,7 @@ Options:
   --force-network          apply --network even though this ssh session will end (it comes in over the Wi-Fi or wired port
                            that is changed); reconnect through the wired port (172.22.11.2) or the robot's Wi-Fi
   --undo-network           put the network back (restores the netplan files that --network set aside) and exit
+  --check-runtime-deps     inspect the deployed robotCommand and GradleRIO .so files with ldd, then exit
   --dry-run                print what would be done, change nothing
   -h, --help               this text
 EOF
@@ -109,6 +113,7 @@ while [ $# -gt 0 ]; do
     --robot-manager-dir) [ $# -ge 2 ] || die "--robot-manager-dir needs a value"; RM_DIR="$2"; shift ;;
     --allwpilib-dir) [ $# -ge 2 ] || die "--allwpilib-dir needs a value"; AW_DIR="$2"; shift ;;
     --sudoers) WITH_SUDOERS=1 ;;
+    --no-install-deps) INSTALL_DEPS=0 ;;
     --skip-drivers) SKIP_DRIVERS=1 ;;
     --upgrade-drivers) UPGRADE_DRIVERS=1 ;;
     --skip-plugin) SKIP_PLUGIN=1 ;;
@@ -118,6 +123,7 @@ while [ $# -gt 0 ]; do
     --network) APPLY_NETWORK=1 ;;
     --force-network) FORCE_NETWORK=1 ;;
     --undo-network) UNDO_NETWORK=1 ;;
+    --check-runtime-deps) CHECK_RUNTIME_DEPS=1 ;;
     --ap-ssid) [ $# -ge 2 ] || die "--ap-ssid needs a value"; AP_SSID="$2"; shift ;;
     --team) [ $# -ge 2 ] || die "--team needs a value"; AP_TEAM="$2"; shift ;;
     --ap-band) [ $# -ge 2 ] || die "--ap-band needs a value"; AP_BAND="$2"; shift ;;
@@ -134,6 +140,92 @@ run() {
     printf '[dry-run]'; printf ' %q' "$@"; printf '\n'
   else
     "$@"
+  fi
+}
+
+apt_install_packages() {  # apt_install_packages <reason> <package>...
+  local reason="$1"; shift
+  [ "$#" -gt 0 ] || return 0
+  if [ "$INSTALL_DEPS" != 1 ]; then
+    die "$reason are missing. Install these packages and rerun: $*"
+  fi
+  command -v apt-get >/dev/null 2>&1 || die "apt-get is required to install $reason; install packages manually: $*"
+  info "Installing $reason: $*"
+  run env DEBIAN_FRONTEND=noninteractive apt-get update \
+    || die "apt-get update failed; could not install $reason"
+  run env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$@" \
+    || die "apt could not install $reason ($*)"
+}
+
+ensure_base_runtime_dependencies() {
+  local -a packages=()
+  command -v python3 >/dev/null 2>&1 || packages+=(python3)
+  if ! command -v ldd >/dev/null 2>&1 || ! command -v ldconfig >/dev/null 2>&1; then
+    packages+=(libc-bin)
+  fi
+  if [ "${#packages[@]}" -gt 0 ]; then
+    apt_install_packages "robot_manager and native-library runtime tools" "${packages[@]}"
+  fi
+  if [ "$DRY_RUN" != 1 ]; then
+    command -v python3 >/dev/null 2>&1 || die "python3 is required (robot_manager is a Python script)"
+    command -v ldd >/dev/null 2>&1 && command -v ldconfig >/dev/null 2>&1 \
+      || die "ldd and ldconfig are required to validate native runtime dependencies"
+  fi
+}
+
+compiler_major() {  # compiler_major <compiler>
+  "$1" -dumpfullversion -dumpversion 2>/dev/null | cut -d. -f1
+}
+
+BUILD_CC=gcc
+BUILD_CXX=g++
+ensure_build_dependencies() {
+  local need_build=0 need_modern_cpp=0
+  if [ "$SKIP_DRIVERS" != 1 ] || [ "$SKIP_PLUGIN" != 1 ] || [ "$SKIP_SHIM" != 1 ] || [ "$SKIP_LSE_EMU" != 1 ]; then
+    need_build=1
+  fi
+  [ "$need_build" = 1 ] || return 0
+
+  if ! command -v gcc >/dev/null 2>&1 || ! command -v g++ >/dev/null 2>&1 || ! command -v make >/dev/null 2>&1; then
+    apt_install_packages "the C/C++ build tools" build-essential
+  fi
+
+  local major=""
+  if command -v g++ >/dev/null 2>&1; then major="$(compiler_major g++)"; fi
+  if [ "$SKIP_PLUGIN" != 1 ] && { [ -z "$major" ] || [ "$major" -lt 11 ]; }; then
+    need_modern_cpp=1
+    # Prefer the system compiler when it is already new enough; otherwise use
+    # Ubuntu's versioned GCC 11 package without changing the OS-wide default.
+    if command -v gcc-11 >/dev/null 2>&1 && command -v g++-11 >/dev/null 2>&1; then
+      BUILD_CC=gcc-11
+      BUILD_CXX=g++-11
+    elif [ "$DRY_RUN" = 1 ]; then
+      BUILD_CC=gcc-11
+      BUILD_CXX=g++-11
+      apt_install_packages "GCC 11 for the C++20 Studica plugin" build-essential gcc-11 g++-11
+    else
+      apt_install_packages "GCC 11 for the C++20 Studica plugin" build-essential gcc-11 g++-11
+      command -v gcc-11 >/dev/null 2>&1 && command -v g++-11 >/dev/null 2>&1 \
+        || die "GCC 11 packages installed but gcc-11/g++-11 are unavailable"
+      BUILD_CC=gcc-11
+      BUILD_CXX=g++-11
+    fi
+  fi
+
+  if [ "$DRY_RUN" != 1 ]; then
+    command -v "$BUILD_CC" >/dev/null 2>&1 || die "$BUILD_CC is required to build the GPIO shim and LSE emulator"
+    command -v "$BUILD_CXX" >/dev/null 2>&1 || die "$BUILD_CXX is required to build Studica components"
+    command -v make >/dev/null 2>&1 || die "make is required to build Studica components"
+    if [ "$SKIP_PLUGIN" != 1 ]; then
+      major="$(compiler_major "$BUILD_CXX")"
+      [ -n "$major" ] && [ "$major" -ge 11 ] \
+        || die "the Studica backend requires GCC/G++ 11 or newer for C++20; found '${major:-unknown}'"
+    fi
+  elif [ "$need_modern_cpp" = 0 ]; then
+    info "C/C++ build tools: $(tool_version "$BUILD_CXX" --version)"
+  fi
+  if [ "$DRY_RUN" != 1 ]; then
+    echo "  build compilers: $BUILD_CC / $BUILD_CXX; make: $(tool_version make --version)"
   fi
 }
 
@@ -159,20 +251,137 @@ preflight() {
   echo "  model:   ${model:-unknown}"
   echo "  glibc:   $(ldd --version 2>/dev/null | head -1 || echo unknown)"
   echo "  g++:     $(tool_version g++ --version)"
-  echo "  java:    $(tool_version java -version)"
   echo "  python3: $(tool_version python3 --version)"
-  command -v python3 >/dev/null 2>&1 || die "python3 is required (robot_manager is a Python script)"
-  command -v systemctl >/dev/null 2>&1 || die "systemd (systemctl) is required"
+  if ! command -v python3 >/dev/null 2>&1; then
+    [ "$DRY_RUN" = 1 ] && warn "python3 is missing; it will be installed before robot_manager starts" \
+      || die "python3 is required (robot_manager is a Python script)"
+  fi
+  if ! command -v systemctl >/dev/null 2>&1; then
+    [ "$DRY_RUN" = 1 ] && warn "systemctl is missing on this host; the dry run cannot validate service operations" \
+      || die "systemd (systemctl) is required on the VMX-pi"
+  fi
+  if [ "$(uname -m)" != aarch64 ]; then
+    [ "$DRY_RUN" = 1 ] && warn "dry run is on $(uname -m); real installation/builds require the VMX-pi aarch64 host" \
+      || die "this installer builds VMX aarch64 libraries and must run on aarch64 (found $(uname -m))"
+  fi
 }
 
-have_vmx() { [ -f /usr/local/include/vmxpi/VMXPi.h ] && [ -d /usr/local/lib/vmxpi ]; }
+have_vmx() {
+  [ -f /usr/local/include/vmxpi/VMXPi.h ] && [ -f /usr/local/lib/vmxpi/libvmxpi_hal_cpp.so ]
+}
 
-gpp_major() { g++ -dumpversion 2>/dev/null | cut -d. -f1; }
+gpp_major() { compiler_major "${BUILD_CXX:-g++}"; }
+
+validate_install_inputs() {
+  if [ "$DRY_RUN" = 1 ]; then
+    [ -f "$RM_DIR/robot_manager.py" ] && [ -f "$RM_DIR/robot_manager.service" ] \
+      || warn "dry run: Robot-Manager sources are not present at $RM_DIR"
+    have_vmx || warn "dry run: VMX headers/libraries are not on this host; required on the robot for Studica builds"
+    [ -f "$AW_DIR/simulation/halsim_vmx/src/studica/native/cpp/StudicaBackend.cpp" ] \
+      || warn "dry run: halsim_vmx source is not present under $AW_DIR"
+    return 0
+  fi
+  [ -f "$RM_DIR/robot_manager.py" ] && [ -f "$RM_DIR/robot_manager.service" ] \
+    || die "robot_manager.py / robot_manager.service not found in $RM_DIR (use --robot-manager-dir)"
+
+  if [ "$SKIP_PLUGIN" != 1 ]; then
+    have_vmx || die "VMX SDK missing: expected /usr/local/include/vmxpi/VMXPi.h and /usr/local/lib/vmxpi/libvmxpi_hal_cpp.so. Install the vmxpi-hal SDK (for example, the package built by vmxpi-aarch64-hal-builder), then rerun or pass --skip-plugin."
+    local hv="$AW_DIR/simulation/halsim_vmx/src"
+    [ -f "$hv/studica/native/cpp/StudicaBackend.cpp" ] \
+      || die "halsim_vmx plugin source not found under $AW_DIR (use --allwpilib-dir or pass --skip-plugin)"
+    [ -d "$AW_DIR/studica_drivers" ] \
+      || die "studica_drivers source not found under $AW_DIR (use --allwpilib-dir or pass --skip-plugin)"
+  fi
+
+  if [ "$SKIP_DRIVERS" != 1 ] && { [ "$UPGRADE_DRIVERS" = 1 ] || [ ! -f /usr/local/lib/studica_drivers/libstudica_drivers.so ]; }; then
+    have_vmx || die "VMX SDK missing: expected /usr/local/include/vmxpi/VMXPi.h and /usr/local/lib/vmxpi/libvmxpi_hal_cpp.so. Install the vmxpi-hal SDK (for example, the package built by vmxpi-aarch64-hal-builder), or pass --skip-drivers."
+    [ -d "$AW_DIR/studica_drivers" ] \
+      || die "studica_drivers source not found under $AW_DIR (use --allwpilib-dir or pass --skip-drivers)"
+  fi
+  if [ "$SKIP_SHIM" != 1 ]; then
+    [ -f "$RM_DIR/gpio_isr_shim/gpio_isr_shim.c" ] \
+      || die "GPIO shim source is missing from $RM_DIR (or pass --skip-shim)"
+  fi
+  if [ "$SKIP_LSE_EMU" != 1 ]; then
+    [ -f "$RM_DIR/lse_emu/lse_emu.c" ] \
+      || die "LSE emulator source is missing from $RM_DIR (or pass --skip-lse-emu)"
+  fi
+  [ -f "$RM_DIR/net/vmx_net.py" ] || die "network command source is missing from $RM_DIR"
+  if [ "$WITH_SUDOERS" = 1 ]; then
+    command -v visudo >/dev/null 2>&1 || die "visudo is required to validate --sudoers rules"
+  fi
+}
+
+verify_shared_library() {  # verify_shared_library <path> [extra-library-path]
+  local path="$1" search_path="${2:-/usr/local/lib/vmxpi}" result
+  [ -f "$path" ] || die "expected shared library was not built: $path"
+  result="$(LD_LIBRARY_PATH="$search_path${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ldd "$path" 2>&1)" \
+    || die "could not inspect runtime dependencies for $path: $result"
+  if grep -q 'not found' <<<"$result"; then
+    echo "$result" >&2
+    die "unresolved runtime dependency in $path"
+  fi
+}
+
+check_deployed_wpilib_runtime() {
+  local lib_dir="$ROBOT_HOME/wpilib/third-party/lib"
+  local command_file="$ROBOT_HOME/robotCommand"
+  local search_path="$lib_dir:/usr/local/lib/vmxpi:$PLUGIN_DIR:$OPT_DIR/lib"
+  local count=0 executable result library
+  local -a libraries=()
+  info "WPILib deployed runtime dependencies"
+  if [ ! -d "$lib_dir" ] && [ ! -f "$command_file" ]; then
+    if [ "$CHECK_RUNTIME_DEPS" = 1 ]; then
+      die "no GradleRIO deployment found under $ROBOT_HOME; deploy the robot program first"
+    fi
+    echo "  no GradleRIO deployment yet; its project-specific libraries will be checked after deploy"
+    return 0
+  fi
+  command -v ldd >/dev/null 2>&1 || die "ldd is required to inspect deployed native dependencies"
+  if [ -d "$lib_dir" ]; then
+    mapfile -d '' -t libraries < <(find "$lib_dir" -type f \( -name '*.so' -o -name '*.so.*' \) ! -name '*.debug' -print0)
+    for library in "${libraries[@]}"; do
+      verify_shared_library "$library" "$search_path"
+      count=$((count + 1))
+    done
+  fi
+  if [ -f "$command_file" ]; then
+    executable="$(python3 - "$command_file" "$ROBOT_HOME" <<'PY'
+import os
+import re
+import shlex
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as command_file:
+    words = shlex.split(command_file.read())
+index = 0
+while index < len(words) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[index]):
+    index += 1
+if index < len(words) and words[index] == "gdbserver":
+    index += 2  # gdbserver and its :port argument
+if index >= len(words):
+    raise SystemExit("robotCommand does not contain a program path")
+program = words[index]
+if not os.path.isabs(program):
+    program = os.path.join(sys.argv[2], program)
+print(program)
+PY
+)" || die "could not read the executable from $command_file"
+    verify_shared_library "$executable" "$search_path"
+    count=$((count + 1))
+  fi
+  if [ "$count" -eq 0 ]; then
+    if [ "$CHECK_RUNTIME_DEPS" = 1 ]; then
+      die "no deployed executable or shared libraries were found under $ROBOT_HOME"
+    fi
+    echo "  GradleRIO deployment files are not present yet; skipped"
+    return 0
+  fi
+  echo "  checked $count deployed executable/shared librar$( [ "$count" -eq 1 ] && echo "y" || echo "ies" ); no unresolved dependencies"
+}
 
 install_robot_manager() {
   info "robot_manager"
-  [ -f "$RM_DIR/robot_manager.py" ] && [ -f "$RM_DIR/robot_manager.service" ] \
-    || die "robot_manager.py / robot_manager.service not found in $RM_DIR (use --robot-manager-dir)"
   run install -d -m 0755 "$OPT_DIR" "$CONF_DIR"
   run install -m 0755 "$RM_DIR/robot_manager.py" "$OPT_DIR/robot_manager.py"
   run install -m 0644 "$RM_DIR/robot_manager.service" "/etc/systemd/system/$SERVICE.service"
@@ -197,7 +406,7 @@ EOF
 install_drivers() {
   info "studica_drivers"
   if [ "$SKIP_DRIVERS" = 1 ]; then echo "  skipped (--skip-drivers)"; return; fi
-  have_vmx || { warn "VMXPi.h / vmxpi_hal_cpp not found under /usr/local; skipping studica_drivers"; return; }
+  have_vmx || { [ "$DRY_RUN" = 1 ] && { warn "dry run: VMX SDK is absent on this host; skipping the local driver build preview"; return; }; die "VMX SDK not found under /usr/local; cannot build studica_drivers"; }
   # The vmx-hal package already ships (an older) libstudica_drivers. Do not overwrite files a package owns
   # unless asked. The halsim_vmx plugin compiles the driver sources itself, so it does not need this library.
   if [ -f /usr/local/lib/studica_drivers/libstudica_drivers.so ] && [ "$UPGRADE_DRIVERS" != 1 ]; then
@@ -205,59 +414,61 @@ install_drivers() {
     echo "  pass --upgrade-drivers to install this repo's newer copy over it (replaces package-owned files)."
     return
   fi
-  if ! command -v g++ >/dev/null 2>&1 || ! command -v make >/dev/null 2>&1; then
-    warn "g++ and make are required; skipping studica_drivers (sudo apt install -y g++ make)"; return
-  fi
-  [ -d "$AW_DIR/studica_drivers" ] || { warn "$AW_DIR/studica_drivers not found (use --allwpilib-dir); skipping studica_drivers"; return; }
-
   # Build in a copy so the checkout is not littered with build output (or root-owned files).
   run rm -rf "$BUILD_DIR/studica_drivers"
   run install -d "$BUILD_DIR"
   run cp -r "$AW_DIR/studica_drivers" "$BUILD_DIR/studica_drivers"
-  run make -C "$BUILD_DIR/studica_drivers"
-  run make -C "$BUILD_DIR/studica_drivers" install
+  run make -C "$BUILD_DIR/studica_drivers" CC="$BUILD_CC" CXX="$BUILD_CXX"
+  if [ "$DRY_RUN" != 1 ] && ! compgen -G "$BUILD_DIR/studica_drivers/*.hpp" >/dev/null; then
+    die "studica_drivers build produced no public headers"
+  fi
+  # Copy as root directly. The upstream Makefile's install target invokes sudo,
+  # which is unnecessary here and is not guaranteed in minimal images.
+  run install -d /usr/local/include/studica_drivers /usr/local/lib/studica_drivers
+  run install -m 0644 "$BUILD_DIR"/studica_drivers/*.hpp /usr/local/include/studica_drivers/
+  run install -m 0755 "$BUILD_DIR/studica_drivers/libstudica_drivers.so" /usr/local/lib/studica_drivers/
+  run ldconfig
+  if [ "$DRY_RUN" != 1 ]; then verify_shared_library /usr/local/lib/studica_drivers/libstudica_drivers.so; fi
 }
 
 install_plugin() {
   info "Studica backend plugin for halsim_vmx"
   if [ "$SKIP_PLUGIN" = 1 ]; then echo "  skipped (--skip-plugin)"; return; fi
-  have_vmx || { warn "VMXPi.h / vmxpi_hal_cpp not found under /usr/local; skipping the plugin"; return; }
-  command -v g++ >/dev/null 2>&1 || { warn "g++ is required; skipping the plugin (sudo apt install -y g++ make)"; return; }
+  have_vmx || { [ "$DRY_RUN" = 1 ] && { warn "dry run: VMX SDK is absent on this host; skipping the local plugin build preview"; return; }; die "VMX SDK not found under /usr/local; cannot build the Studica backend plugin"; }
   local major; major="$(gpp_major)"
-  if [ -z "$major" ] || [ "$major" -lt 11 ]; then
-    warn "g++ >= 11 (C++20) is required, found '${major:-none}'; skipping the plugin"; return
+  if [ "$DRY_RUN" != 1 ]; then
+    [ -n "$major" ] && [ "$major" -ge 11 ] || die "$BUILD_CXX >= 11 (C++20) is required, found '${major:-none}'"
+  else
+    info "Would build the plugin with $BUILD_CXX (GCC/G++ 11 or newer is required)"
   fi
 
   local drv="$AW_DIR/studica_drivers"
   local hv="$AW_DIR/simulation/halsim_vmx/src"
-  [ -f "$hv/studica/native/cpp/StudicaBackend.cpp" ] && [ -d "$drv" ] \
-    || { warn "halsim_vmx sources not found under $AW_DIR (use --allwpilib-dir); skipping the plugin"; return; }
-
   run install -d -m 0755 "$PLUGIN_DIR"
-  run g++ -std=c++20 -shared -fPIC -O2 \
+  run "$BUILD_CXX" -std=c++20 -shared -fPIC -O2 \
     -I/usr/local/include/vmxpi -I"$drv" \
     -I"$hv/main/native/include" -I"$hv/studica/native/include" \
     "$hv/studica/native/cpp/StudicaBackend.cpp" \
     "$drv/analog_input.cpp" "$drv/dio.cpp" "$drv/encoder.cpp" "$drv/imu.cpp" \
     -L/usr/local/lib/vmxpi -lvmxpi_hal_cpp -lrt -lpthread -latomic \
     -o "$PLUGIN_DIR/libhalsim_vmx_studica.so"
+  if [ "$DRY_RUN" != 1 ]; then
+    run ldconfig
+    verify_shared_library "$PLUGIN_DIR/libhalsim_vmx_studica.so"
+  fi
 }
 
 install_shim() {
   info "GPIO interrupt shim"
   if [ "$SKIP_SHIM" = 1 ]; then echo "  skipped (--skip-shim)"; return; fi
   local src="$RM_DIR/gpio_isr_shim"
-  [ -f "$src/gpio_isr_shim.c" ] || { warn "$src/gpio_isr_shim.c not found; skipping the shim"; return; }
-  if ! command -v gcc >/dev/null 2>&1 || ! command -v make >/dev/null 2>&1; then
-    warn "gcc and make are required; skipping the shim (sudo apt install -y g++ make)"; return
-  fi
-
   run rm -rf "$BUILD_DIR/gpio_isr_shim"
   run install -d "$BUILD_DIR" "$OPT_DIR/lib"
   run cp -r "$src" "$BUILD_DIR/gpio_isr_shim"
-  run make -C "$BUILD_DIR/gpio_isr_shim" test
-  run make -C "$BUILD_DIR/gpio_isr_shim"
+  run make -C "$BUILD_DIR/gpio_isr_shim" CC="$BUILD_CC" test
+  run make -C "$BUILD_DIR/gpio_isr_shim" CC="$BUILD_CC"
   run install -m 0755 "$BUILD_DIR/gpio_isr_shim/libvmx_gpio_isr_shim.so" "$OPT_DIR/lib/libvmx_gpio_isr_shim.so"
+  if [ "$DRY_RUN" != 1 ]; then verify_shared_library "$OPT_DIR/lib/libvmx_gpio_isr_shim.so"; fi
   if [ ! -d /sys/class/gpio ]; then
     echo "  this kernel has no /sys/class/gpio, so the HAL needs the shim. Add to $CONF_DIR/config.json:"
     echo "    \"env\": { \"LD_PRELOAD\": \"$OPT_DIR/lib/libvmx_gpio_isr_shim.so\" }"
@@ -268,17 +479,13 @@ install_lse_emu() {
   info "LSE atomics emulation"
   if [ "$SKIP_LSE_EMU" = 1 ]; then echo "  skipped (--skip-lse-emu)"; return; fi
   local src="$RM_DIR/lse_emu"
-  [ -f "$src/lse_emu.c" ] || { warn "$src/lse_emu.c not found; skipping the LSE emulation"; return; }
-  if ! command -v gcc >/dev/null 2>&1 || ! command -v make >/dev/null 2>&1; then
-    warn "gcc and make are required; skipping the LSE emulation (sudo apt install -y g++ make)"; return
-  fi
-
   run rm -rf "$BUILD_DIR/lse_emu"
   run install -d "$BUILD_DIR" "$OPT_DIR/lib"
   run cp -r "$src" "$BUILD_DIR/lse_emu"
-  run make -C "$BUILD_DIR/lse_emu" test
-  run make -C "$BUILD_DIR/lse_emu"
+  run make -C "$BUILD_DIR/lse_emu" CC="$BUILD_CC" test
+  run make -C "$BUILD_DIR/lse_emu" CC="$BUILD_CC"
   run install -m 0755 "$BUILD_DIR/lse_emu/libvmx_lse_emu.so" "$OPT_DIR/lib/libvmx_lse_emu.so"
+  if [ "$DRY_RUN" != 1 ]; then verify_shared_library "$OPT_DIR/lib/libvmx_lse_emu.so"; fi
   if grep -m1 '^Features' /proc/cpuinfo 2>/dev/null | grep -qw atomics; then
     echo "  this CPU has LSE atomics: robot_manager will not load it"
   else
@@ -329,9 +536,13 @@ apply_network() {
   command -v iw >/dev/null 2>&1 || missing=1
   [ -x /usr/sbin/dnsmasq ] || command -v dnsmasq >/dev/null 2>&1 || missing=1   # dnsmasq-base: NetworkManager's DHCP server
   if [ "$missing" = 1 ]; then
-    info "Installing network-manager, dnsmasq-base and iw (needs the internet)"
-    run env DEBIAN_FRONTEND=noninteractive apt-get install -y network-manager dnsmasq-base iw \
-      || die "apt could not install the network packages; the network was not changed"
+    apt_install_packages "network configuration tools (internet access is required)" network-manager dnsmasq-base iw
+    if [ "$DRY_RUN" != 1 ]; then
+      command -v nmcli >/dev/null 2>&1 && command -v iw >/dev/null 2>&1 \
+        || die "network tools are still unavailable; the network was not changed"
+      [ -x /usr/sbin/dnsmasq ] || command -v dnsmasq >/dev/null 2>&1 \
+        || die "dnsmasq is still unavailable; the network was not changed"
+    fi
   fi
 
   # The connection files: written for NetworkManager, which has not started yet.
@@ -437,14 +648,17 @@ summary() {
   plugin:    $PLUGIN_DIR/libhalsim_vmx_studica.so   -> HALSIMVMX_BACKEND
   shim:      $OPT_DIR/lib/libvmx_gpio_isr_shim.so   -> LD_PRELOAD (only on kernels without /sys/class/gpio)
   lse emu:   $OPT_DIR/lib/libvmx_lse_emu.so   -> LD_AUDIT, set by robot_manager on CPUs without LSE atomics
+  build:     $BUILD_CC / $BUILD_CXX and make (missing packages installed by apt; --no-install-deps disables this)
   cpu:       systemctl status robot_cpu_max      (governor performance, at every boot)
   network:   setupHotspot SSID TEAM BAND [PASSWORD], toggleNetMode ap|wifi, setupEthernet   (add --network to apply)
-Next: allwpilib/simulation/halsim_vmx/HARDWARE_CHECKLIST.md (section 1 onward). Nothing here has been run on a VMX yet.
+  runtime:   ./install.sh --check-runtime-deps --user $LOGIN_USER (after GradleRIO deploy)
+WPILib/OpenCV shared libraries are deployed per project by GradleRIO; this installer checks them but does not select a global OpenCV version.
+Next: allwpilib/simulation/halsim_vmx/HARDWARE_CHECKLIST.md.
 EOF
 }
 
 # Not root: re-run through sudo (it asks for the password itself). A dry run needs no root.
-if [ "$DRY_RUN" != 1 ] && [ "$(id -u)" != 0 ]; then
+if [ "$DRY_RUN" != 1 ] && [ "$CHECK_RUNTIME_DEPS" != 1 ] && [ "$(id -u)" != 0 ]; then
   command -v sudo >/dev/null 2>&1 || die "must run as root (sudo not found)"
   exec sudo "$0" "${ORIG_ARGS[@]}"
 fi
@@ -452,12 +666,20 @@ fi
 [ -n "$LOGIN_USER" ] || LOGIN_USER="${SUDO_USER:-$(id -un)}"
 [ -n "$ROBOT_HOME" ] || ROBOT_HOME="/home/$LOGIN_USER"
 
+if [ "$CHECK_RUNTIME_DEPS" = 1 ]; then
+  check_deployed_wpilib_runtime
+  exit 0
+fi
+
 if [ "$UNDO_NETWORK" = 1 ]; then
   undo_network
   exit 0
 fi
 
+ensure_base_runtime_dependencies
 preflight
+validate_install_inputs
+ensure_build_dependencies
 install_robot_manager
 install_drivers
 install_plugin
@@ -466,5 +688,6 @@ install_lse_emu
 install_cpu_max
 install_network
 install_sudoers
+check_deployed_wpilib_runtime
 restart_service
 summary
