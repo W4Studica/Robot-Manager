@@ -277,13 +277,6 @@ preflight() {
   echo "  glibc:   $(ldd --version 2>/dev/null | head -1 || echo unknown)"
   echo "  g++:     $(tool_version g++ --version)"
   echo "  python3: $(tool_version python3 --version)"
-  if ! command -v python3 >/dev/null 2>&1; then
-    if [ "$DRY_RUN" = 1 ]; then
-      warn "python3 is missing; it will be installed before robot_manager starts"
-    else
-      die "python3 is required (robot_manager is a Python script)"
-    fi
-  fi
   if ! command -v systemctl >/dev/null 2>&1; then
     if [ "$DRY_RUN" = 1 ]; then
       warn "systemctl is missing on this host; the dry run cannot validate service operations"
@@ -711,8 +704,8 @@ if [ "$UNDO_NETWORK" = 1 ]; then
   exit 0
 fi
 
-ensure_base_runtime_dependencies
 preflight
+ensure_base_runtime_dependencies
 validate_install_inputs
 ensure_build_dependencies
 install_robot_manager
