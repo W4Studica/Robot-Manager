@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # install.sh - install the W4Studica VMX software. Run it ON the Studica VMX-pi.
 #
-#     sudo ./install.sh [options]
+#     ./install.sh [options]        (run as the login user; sudo is requested when needed)
 #
 # It lives in the W4Studica/Robot-Manager repo. Clone that repo and the W4Studica/allwpilib
 # repo side by side on the robot (only allwpilib's studica_drivers/ and
@@ -10,8 +10,8 @@
 #     ~/allwpilib/
 # or point at them with --robot-manager-dir / --allwpilib-dir.
 #
-# No ssh and no passwords: if it is not started as root it re-runs itself through sudo,
-# which asks for the password itself.
+# It never opens an SSH connection or stores passwords. An SSH-launched install is handed
+# to systemd on the robot before privilege escalation can lose the SSH session context.
 #
 # What it does (required build dependencies are installed when missing; optional steps have explicit --skip flags):
 #   1. robot_manager      /opt/robot_manager, /etc/robot_manager/config.json (only if missing),
@@ -43,6 +43,8 @@ BUILD_DIR=/opt/robot_manager/build
 SERVICE=robot_manager
 
 DRY_RUN=0
+DETACH_INSTALL=0
+RUNNING_DETACHED=0
 INSTALL_DEPS=1
 WITH_SUDOERS=0
 SKIP_DRIVERS=0
@@ -67,14 +69,15 @@ if [ -d "$SELF_DIR/../allwpilib" ]; then AW_DIR="$SELF_DIR/../allwpilib"; else A
 
 usage() {
   cat <<'EOF'
-Usage: sudo ./install.sh [options]      (run on the robot)
+Usage: ./install.sh [options]      (run on the robot; over SSH it continues as a systemd job)
 
 Options:
-  --user NAME              login user that deploys to this robot (default: the user who ran sudo)
+  --user NAME              login user that deploys to this robot (default: invoking user or SUDO_USER)
   --robot-home DIR         robot_home for robot_manager (default: /home/<user>)
   --robot-manager-dir DIR  Robot-Manager checkout (default: the directory of install.sh)
   --allwpilib-dir DIR      allwpilib checkout (default: ../allwpilib next to this repo)
   --sudoers                allow the login user passwordless sudo for: systemctl (robot_manager), ldconfig, sync
+  --detach                 run installation as a robot-managed systemd job, even outside SSH
   --no-install-deps        do not install missing apt packages; fail with the package list instead
   --skip-drivers           do not build/install studica_drivers
   --upgrade-drivers        replace an already installed studica_drivers (e.g. from the vmx-hal package) with this repo's copy
@@ -113,6 +116,8 @@ while [ $# -gt 0 ]; do
     --robot-manager-dir) [ $# -ge 2 ] || die "--robot-manager-dir needs a value"; RM_DIR="$2"; shift ;;
     --allwpilib-dir) [ $# -ge 2 ] || die "--allwpilib-dir needs a value"; AW_DIR="$2"; shift ;;
     --sudoers) WITH_SUDOERS=1 ;;
+    --detach) DETACH_INSTALL=1 ;;
+    --_run-detached) RUNNING_DETACHED=1 ;;
     --no-install-deps) INSTALL_DEPS=0 ;;
     --skip-drivers) SKIP_DRIVERS=1 ;;
     --upgrade-drivers) UPGRADE_DRIVERS=1 ;;
@@ -688,14 +693,39 @@ Next: allwpilib/simulation/halsim_vmx/HARDWARE_CHECKLIST.md.
 EOF
 }
 
-# Not root: re-run through sudo (it asks for the password itself). A dry run needs no root.
-if [ "$DRY_RUN" != 1 ] && [ "$CHECK_RUNTIME_DEPS" != 1 ] && [ "$(id -u)" != 0 ]; then
-  command -v sudo >/dev/null 2>&1 || die "must run as root (sudo not found)"
-  exec sudo "$0" "${ORIG_ARGS[@]}"
-fi
-
 [ -n "$LOGIN_USER" ] || LOGIN_USER="${SUDO_USER:-$(id -un)}"
 [ -n "$ROBOT_HOME" ] || ROBOT_HOME="/home/$LOGIN_USER"
+
+# A transient system service survives SSH disconnects, including a disconnect
+# caused by installing NetworkManager. Invoke without sudo over SSH so this
+# process can detect the SSH environment before privilege escalation.
+if [ "$DRY_RUN" != 1 ] && [ "$CHECK_RUNTIME_DEPS" != 1 ] && [ "$RUNNING_DETACHED" != 1 ]; then
+  if [ "$DETACH_INSTALL" = 1 ] || [ -n "${SSH_CONNECTION:-}${SSH_CLIENT:-}" ]; then
+    command -v systemd-run >/dev/null 2>&1 || die "systemd-run is required to keep an SSH install running after disconnect"
+    local_unit="w4studica-install-$(date +%Y%m%d-%H%M%S)-$$.service"
+    working_directory="$(pwd -P)"
+    run_as_root=()
+    if [ "$(id -u)" != 0 ]; then
+      command -v sudo >/dev/null 2>&1 || die "sudo is required to start the robot-managed install service"
+      run_as_root=(sudo)
+    fi
+    info "Starting installation on the robot as $local_unit; it will continue if SSH disconnects"
+    "${run_as_root[@]}" systemd-run --unit="$local_unit" --no-block \
+      --property=Type=exec --property=StandardOutput=journal --property=StandardError=journal \
+      --property="WorkingDirectory=$working_directory" \
+      "$SELF_DIR/install.sh" --_run-detached "${ORIG_ARGS[@]}" \
+      --user "$LOGIN_USER" --robot-home "$ROBOT_HOME" \
+      || die "could not start the robot-managed install service"
+    echo "Follow progress: sudo journalctl -fu $local_unit"
+    echo "Check result:    sudo systemctl status $local_unit --no-pager"
+    exit 0
+  fi
+
+  if [ "$(id -u)" != 0 ]; then
+    command -v sudo >/dev/null 2>&1 || die "must run as root (sudo not found)"
+    exec sudo "$SELF_DIR/install.sh" "${ORIG_ARGS[@]}" --user "$LOGIN_USER" --robot-home "$ROBOT_HOME"
+  fi
+fi
 
 if [ "$CHECK_RUNTIME_DEPS" = 1 ]; then
   check_deployed_wpilib_runtime

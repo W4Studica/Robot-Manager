@@ -113,15 +113,17 @@ deploy는 **GradleRIO가 SSH로 직접** 한다(2027과 동일). `robot_manager`
 
 ### 스크립트로 (`install.sh`)
 
-로봇에서 이 레포와 `W4Studica/allwpilib`를 나란히 clone한 뒤 실행한다. ssh/비밀번호는 다루지 않는다(`sudo`가 직접 물어봄).
+로봇에서 이 레포와 `W4Studica/allwpilib`를 나란히 clone한 뒤 실행한다. SSH 접속에서 `./install.sh`를 실행하면 로봇의 임시 systemd 서비스로 넘겨 설치를 계속하므로, NetworkManager 설치나 네트워크 전환으로 SSH가 끊겨도 작업은 유지된다. 필요한 권한은 시작할 때 `sudo`가 요청한다. 터미널에서 진행 로그를 보려면 출력된 `journalctl -fu <unit>` 명령을 사용한다. `--dry-run`과 `--check-runtime-deps`는 포그라운드에서 실행한다.
 
 ```bash
 git clone https://github.com/W4Studica/Robot-Manager.git
 git clone https://github.com/W4Studica/allwpilib.git
 cd Robot-Manager
 ./install.sh --dry-run --user <deploy할 사용자>      # 먼저 무엇을 할지 확인
-sudo ./install.sh --user <deploy할 사용자> --sudoers
+./install.sh --user <deploy할 사용자> --sudoers
 ```
+
+SSH가 아닌 터미널에서도 백그라운드 설치가 필요하면 `./install.sh --detach`를 사용한다. 설치가 끝난 뒤 `sudo systemctl status <unit> --no-pager`에서 결과를 확인할 수 있다.
 
 `robot_manager` 설치, `studica_drivers` 빌드/설치, `libhalsim_vmx_studica.so` 빌드(`/opt/halsim_vmx/`), 선택적으로 passwordless sudo(`--sudoers`)를 한다.
 빌드에 필요한 `build-essential`이 없으면 apt로 설치한다. Studica 플러그인은 C++20을 쓰므로 기본 `g++`가 11보다 오래되면 GCC 11을 추가로 설치해 사용한다. Python 3도 robot_manager 실행에 필요하므로 없으면 설치한다. 패키지 설치를 원하지 않으면 `--no-install-deps`를 주면 되며, 필요한 패키지 목록을 안내하고 종료한다. 필수 VMX SDK 파일이나 소스가 빠진 경우에는 조용히 건너뛰지 않고 오류를 낸다. 의도적으로 구성요소를 제외할 때는 `--skip-*` 옵션을 쓴다.
