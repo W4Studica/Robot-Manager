@@ -149,7 +149,9 @@ apt_install_packages() {  # apt_install_packages <reason> <package>...
   if [ "$INSTALL_DEPS" != 1 ]; then
     die "$reason are missing. Install these packages and rerun: $*"
   fi
-  command -v apt-get >/dev/null 2>&1 || die "apt-get is required to install $reason; install packages manually: $*"
+  if [ "$DRY_RUN" != 1 ]; then
+    command -v apt-get >/dev/null 2>&1 || die "apt-get is required to install $reason; install packages manually: $*"
+  fi
   info "Installing $reason: $*"
   run env DEBIAN_FRONTEND=noninteractive apt-get update \
     || die "apt-get update failed; could not install $reason"
