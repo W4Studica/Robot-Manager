@@ -179,6 +179,16 @@ compiler_major() {  # compiler_major <compiler>
   "$1" -dumpfullversion -dumpversion 2>/dev/null | cut -d. -f1
 }
 
+c_compiler_works() {  # c_compiler_works <compiler>
+  command -v "$1" >/dev/null 2>&1 \
+    && printf 'int main(void) { return 0; }\n' | "$1" -x c - -o /dev/null >/dev/null 2>&1
+}
+
+cpp_compiler_works() {  # cpp_compiler_works <compiler>
+  command -v "$1" >/dev/null 2>&1 \
+    && printf 'int main() { return 0; }\n' | "$1" -std=c++20 -x c++ - -o /dev/null >/dev/null 2>&1
+}
+
 BUILD_CC=gcc
 BUILD_CXX=g++
 ensure_build_dependencies() {
@@ -188,7 +198,7 @@ ensure_build_dependencies() {
   fi
   [ "$need_build" = 1 ] || return 0
 
-  if ! command -v gcc >/dev/null 2>&1 || ! command -v g++ >/dev/null 2>&1 || ! command -v make >/dev/null 2>&1; then
+  if ! c_compiler_works gcc || ! cpp_compiler_works g++ || ! command -v make >/dev/null 2>&1; then
     apt_install_packages "the C/C++ build tools" build-essential
   fi
 
@@ -215,8 +225,8 @@ ensure_build_dependencies() {
   fi
 
   if [ "$DRY_RUN" != 1 ]; then
-    command -v "$BUILD_CC" >/dev/null 2>&1 || die "$BUILD_CC is required to build the GPIO shim and LSE emulator"
-    command -v "$BUILD_CXX" >/dev/null 2>&1 || die "$BUILD_CXX is required to build Studica components"
+    c_compiler_works "$BUILD_CC" || die "$BUILD_CC cannot compile and link a C program; install build-essential and rerun"
+    cpp_compiler_works "$BUILD_CXX" || die "$BUILD_CXX cannot compile and link a C++20 program; install build-essential and rerun"
     command -v make >/dev/null 2>&1 || die "make is required to build Studica components"
     if [ "$SKIP_PLUGIN" != 1 ]; then
       major="$(compiler_major "$BUILD_CXX")"
