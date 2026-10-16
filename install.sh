@@ -145,9 +145,10 @@ apt_install_packages() {  # apt_install_packages <reason> <package>...
     command -v apt-get >/dev/null 2>&1 || die "apt-get is required to install $reason; install packages manually: $*"
   fi
   info "Installing $reason: $*"
-  run env DEBIAN_FRONTEND=noninteractive apt-get update \
+  info "Waiting up to 10 minutes for apt/dpkg locks held by automatic updates."
+  run env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 update \
     || die "apt-get update failed; could not install $reason"
-  run env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$@" \
+  run env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y --no-install-recommends "$@" \
     || die "apt could not install $reason ($*)"
 }
 
@@ -209,7 +210,7 @@ ensure_vmx_hal_sdk() {
     [ "$INSTALL_DEPS" = 1 ] || die "VMX HAL SDK is missing. Install it manually with: sudo apt-get install '$package'"
     [ "$DRY_RUN" = 1 ] || command -v apt-get >/dev/null 2>&1 || die "apt-get is required to install the VMX HAL SDK package"
     info "Installing VMX HAL SDK package: $package"
-    run env DEBIAN_FRONTEND=noninteractive apt-get install -y "$package" \
+    run env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y "$package" \
       || die "could not install the VMX HAL SDK package: $package"
   elif [ "$DRY_RUN" = 1 ]; then
     warn "dry run: vmxpi-hal package not found; expected $SELF_DIR/../vmxpi-aarch64-hal-builder/dist/vmxpi-hal_*_arm64.deb"
