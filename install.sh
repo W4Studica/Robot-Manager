@@ -13,24 +13,26 @@
 # It never opens an SSH connection or stores passwords. An SSH-launched install is handed
 # to systemd on the robot before privilege escalation can lose the SSH session context.
 #
-# What it does (required build dependencies are installed when missing; optional steps have explicit --skip flags):
+# What it does (required build/runtime dependencies are installed when missing; optional steps have explicit --skip flags):
 #   1. robot_manager      /opt/robot_manager, /etc/robot_manager/config.json (only if missing),
-#                         systemd service robot_manager (enabled and restarted)
-#   2. studica_drivers    built with Studica's Makefile, copied into /usr/local (needs g++, make, VMXPi.h)
-#   3. Studica plugin     /opt/halsim_vmx/libhalsim_vmx_studica.so for halsim_vmx (needs g++ >= 11, VMXPi.h)
-#   4. GPIO interrupt shim /opt/robot_manager/lib/libvmx_gpio_isr_shim.so (needs gcc and make). Fixes
+#                         systemd service robot_manager (enabled and restarted); serves RioLog on TCP 1741
+#   2. RioLog discovery   Avahi publishes robot.local, the hostname used by WPILib's RioLog client
+#   3. VMX HAL SDK         installs vmxpi-hal .deb from the sibling builder's dist/ when headers/libs are missing
+#   3. studica_drivers    built with Studica's Makefile, copied into /usr/local (needs g++, make, VMXPi.h)
+#   4. Studica plugin     /opt/halsim_vmx/libhalsim_vmx_studica.so for halsim_vmx (needs g++ >= 11, VMXPi.h)
+#   5. GPIO interrupt shim /opt/robot_manager/lib/libvmx_gpio_isr_shim.so (needs gcc and make). Fixes
 #                         "RPI GPIO Interrupt Enable: PI_BAD_ISR_INIT" on kernels without GPIO sysfs
-#   5. LSE atomics emulation /opt/robot_manager/lib/libvmx_lse_emu.so (needs gcc and make). Lets WPILib's libMrcLib
+#   6. LSE atomics emulation /opt/robot_manager/lib/libvmx_lse_emu.so (needs gcc and make). Lets WPILib's libMrcLib
 #                         (SystemCore build, uses ARMv8.1 atomics) run on a Pi 4; robot_manager turns it on by itself
-#   6. CPU at full speed /opt/robot_manager/bin/robot_cpu_max.sh + robot_cpu_max.service: governor "performance" and the
+#   7. CPU at full speed /opt/robot_manager/bin/robot_cpu_max.sh + robot_cpu_max.service: governor "performance" and the
 #                         minimum frequency raised to the maximum, at every boot (a 20 ms robot loop should not wait for the clock)
-#   7. network commands   setupHotspot / toggleNetMode / setupEthernet (like the Studica VMX image), always installed;
-#                         --network also applies them: Wi-Fi access point VMX-<team> at 10.XX.YY.2 and the wired port at
-#                         172.22.11.2 (needs NetworkManager; refuses when it would cut the ssh session you are using)
-#   8. sudoers (opt-in)   lets the login user run the few sudo commands `gradlew deploy` uses, without a password
+#   8. network             configures the WorldSkills-1234 Wi-Fi access point and wired port 172.22.11.2;
+#                         after NetworkManager starts, selects AP mode and deletes saved Wi-Fi profiles
+#   9. sudoers (opt-in)   lets the login user run the few sudo commands `gradlew deploy` uses, without a password
 #
-# WPILib/OpenCV native libraries are deployed per robot project by GradleRIO from that project's
-# pinned WPILib dependency graph; this installer does not install a separate system OpenCV version.
+# WPILib/CameraServer/cscore/OpenCV native libraries are deployed per robot project by GradleRIO from
+# that project's pinned dependency graph. The Linux UVC camera interface is provided by the kernel (V4L2);
+# no separate camera daemon or system OpenCV package is required.
 
 set -euo pipefail
 
@@ -53,14 +55,13 @@ SKIP_PLUGIN=0
 SKIP_SHIM=0
 SKIP_LSE_EMU=0
 SKIP_CPU_MAX=0
-APPLY_NETWORK=0
-FORCE_NETWORK=0
 UNDO_NETWORK=0
 CHECK_RUNTIME_DEPS=0
-AP_SSID=VMX
+AP_SSID=WorldSkills
 AP_TEAM=1234
 AP_BAND=2.4
 AP_PASSWORD=password
+VMX_HAL_DEB="${VMX_HAL_DEB:-}"
 ROBOT_HOME=""
 LOGIN_USER=""
 # Defaults: this repo is where install.sh is; allwpilib is a sibling checkout (or inside this directory).
@@ -76,6 +77,7 @@ Options:
   --robot-home DIR         robot_home for robot_manager (default: /home/<user>)
   --robot-manager-dir DIR  Robot-Manager checkout (default: the directory of install.sh)
   --allwpilib-dir DIR      allwpilib checkout (default: ../allwpilib next to this repo)
+  --vmx-hal-deb FILE       install this vmxpi-hal arm64 package if VMX SDK headers/libraries are missing
   --sudoers                allow the login user passwordless sudo for: systemctl (robot_manager), ldconfig, sync
   --detach                 run installation as a robot-managed systemd job, even outside SSH
   --no-install-deps        do not install missing apt packages; fail with the package list instead
@@ -85,17 +87,7 @@ Options:
   --skip-shim              do not build the GPIO interrupt shim (libvmx_gpio_isr_shim.so)
   --skip-lse-emu           do not build the LSE atomics emulation (libvmx_lse_emu.so)
   --skip-cpu-max           do not pin the CPU at its highest frequency (robot_cpu_max.service)
-  --network                also set up the network like the Studica VMX image: the Wi-Fi becomes an access point
-                           (VMX-<team>, 10.XX.YY.2) and the wired port is fixed at 172.22.11.2. Without it only the
-                           commands (setupHotspot, toggleNetMode, setupEthernet) are installed and nothing is changed.
-  --team N                 team number for --network (default 1234 -> SSID VMX-1234, 10.12.34.2)
-  --ap-ssid PREFIX         SSID prefix for --network (default VMX)
-  --ap-band 2.4|5          Wi-Fi band for --network (default 2.4, channel 6)
-  --ap-password PASSWORD   Wi-Fi password for --network (default: the VMX image default; visible in the process list while
-                           install.sh runs, so use setupHotspot afterwards for a private one)
-  --force-network          apply --network even though this ssh session will end (it comes in over the Wi-Fi or wired port
-                           that is changed); reconnect through the wired port (172.22.11.2) or the robot's Wi-Fi
-  --undo-network           put the network back (restores the netplan files that --network set aside) and exit
+  --undo-network           restore the saved pre-install network configuration and exit
   --check-runtime-deps     inspect the deployed robotCommand and GradleRIO .so files with ldd, then exit
   --dry-run                print what would be done, change nothing
   -h, --help               this text
@@ -115,6 +107,7 @@ while [ $# -gt 0 ]; do
     --robot-home) [ $# -ge 2 ] || die "--robot-home needs a value"; ROBOT_HOME="$2"; shift ;;
     --robot-manager-dir) [ $# -ge 2 ] || die "--robot-manager-dir needs a value"; RM_DIR="$2"; shift ;;
     --allwpilib-dir) [ $# -ge 2 ] || die "--allwpilib-dir needs a value"; AW_DIR="$2"; shift ;;
+    --vmx-hal-deb) [ $# -ge 2 ] || die "--vmx-hal-deb needs a value"; VMX_HAL_DEB="$2"; shift ;;
     --sudoers) WITH_SUDOERS=1 ;;
     --detach) DETACH_INSTALL=1 ;;
     --_run-detached) RUNNING_DETACHED=1 ;;
@@ -125,14 +118,8 @@ while [ $# -gt 0 ]; do
     --skip-shim) SKIP_SHIM=1 ;;
     --skip-lse-emu) SKIP_LSE_EMU=1 ;;
     --skip-cpu-max) SKIP_CPU_MAX=1 ;;
-    --network) APPLY_NETWORK=1 ;;
-    --force-network) FORCE_NETWORK=1 ;;
     --undo-network) UNDO_NETWORK=1 ;;
     --check-runtime-deps) CHECK_RUNTIME_DEPS=1 ;;
-    --ap-ssid) [ $# -ge 2 ] || die "--ap-ssid needs a value"; AP_SSID="$2"; shift ;;
-    --team) [ $# -ge 2 ] || die "--team needs a value"; AP_TEAM="$2"; shift ;;
-    --ap-band) [ $# -ge 2 ] || die "--ap-band needs a value"; AP_BAND="$2"; shift ;;
-    --ap-password) [ $# -ge 2 ] || die "--ap-password needs a value"; AP_PASSWORD="$2"; shift ;;
     --dry-run) DRY_RUN=1 ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; die "unknown argument: $1" ;;
@@ -167,6 +154,14 @@ apt_install_packages() {  # apt_install_packages <reason> <package>...
 ensure_base_runtime_dependencies() {
   local -a packages=()
   command -v python3 >/dev/null 2>&1 || packages+=(python3)
+  # WPILib's RioLog client discovers the roboRIO-compatible endpoint as robot.local.
+  # Publish that mDNS name even when the VMX image hostname is "vmx".
+  dpkg-query -W -f='${Status}' avahi-daemon 2>/dev/null | grep -q 'install ok installed' || packages+=(avahi-daemon)
+  # WPILib linuxarm64 and the VMX HAL use the system C/C++ runtimes; libatomic
+  # is explicitly required by the VMX plugin link and is not guaranteed on a minimal image.
+  dpkg-query -W -f='${Status}' libstdc++6 2>/dev/null | grep -q 'install ok installed' || packages+=(libstdc++6)
+  dpkg-query -W -f='${Status}' libgcc-s1 2>/dev/null | grep -q 'install ok installed' || packages+=(libgcc-s1)
+  dpkg-query -W -f='${Status}' libatomic1 2>/dev/null | grep -q 'install ok installed' || packages+=(libatomic1)
   if ! command -v ldd >/dev/null 2>&1 || ! command -v ldconfig >/dev/null 2>&1; then
     packages+=(libc-bin)
   fi
@@ -178,6 +173,51 @@ ensure_base_runtime_dependencies() {
     if ! command -v ldd >/dev/null 2>&1 || ! command -v ldconfig >/dev/null 2>&1; then
       die "ldd and ldconfig are required to validate native runtime dependencies"
     fi
+  fi
+  if [ "$DRY_RUN" != 1 ]; then
+    local avahi_conf=/etc/avahi/avahi-daemon.conf
+    [ -f "$avahi_conf" ] || die "Avahi config not found at $avahi_conf"
+    if ! grep -Eq '^[[:space:]]*host-name[[:space:]]*=[[:space:]]*robot[[:space:]]*$' "$avahi_conf"; then
+      if grep -Eq '^[[:space:]]*host-name[[:space:]]*=' "$avahi_conf"; then
+        run sed -i -E 's/^[[:space:]]*host-name[[:space:]]*=.*/host-name=robot/' "$avahi_conf"
+    else
+      run sed -i '/^\[server\]/a host-name=robot' "$avahi_conf"
+    fi
+    grep -Eq '^[[:space:]]*host-name[[:space:]]*=[[:space:]]*robot[[:space:]]*$' "$avahi_conf" \
+      || die "could not configure Avahi to publish robot.local in $avahi_conf"
+    fi
+    run systemctl enable --now avahi-daemon
+    run systemctl restart avahi-daemon
+  fi
+}
+
+ensure_vmx_hal_sdk() {
+  # Headers and libvmxpi_hal_cpp.so are not part of Ubuntu or WPILib. They come
+  # from the vmxpi-hal package built from vmxpi-aarch64-hal-builder and are a
+  # hard prerequisite for building the Studica driver/plugin on the robot.
+  if have_vmx || { [ "$SKIP_PLUGIN" = 1 ] && { [ "$SKIP_DRIVERS" = 1 ] || [ -f /usr/local/lib/studica_drivers/libstudica_drivers.so ]; }; }; then
+    return 0
+  fi
+  local package="$VMX_HAL_DEB"
+  if [ -z "$package" ]; then
+    local candidate
+    for candidate in "$SELF_DIR/../vmxpi-aarch64-hal-builder/dist"/vmxpi-hal_*_arm64.deb; do
+      [ -f "$candidate" ] && { package="$candidate"; break; }
+    done
+  fi
+  if [ -n "$package" ] && [ -f "$package" ]; then
+    [ "$INSTALL_DEPS" = 1 ] || die "VMX HAL SDK is missing. Install it manually with: sudo apt-get install '$package'"
+    [ "$DRY_RUN" = 1 ] || command -v apt-get >/dev/null 2>&1 || die "apt-get is required to install the VMX HAL SDK package"
+    info "Installing VMX HAL SDK package: $package"
+    run env DEBIAN_FRONTEND=noninteractive apt-get install -y "$package" \
+      || die "could not install the VMX HAL SDK package: $package"
+  elif [ "$DRY_RUN" = 1 ]; then
+    warn "dry run: vmxpi-hal package not found; expected $SELF_DIR/../vmxpi-aarch64-hal-builder/dist/vmxpi-hal_*_arm64.deb"
+  else
+    die "VMX HAL SDK missing. Build vmxpi-hal_<version>_arm64.deb from vmxpi-aarch64-hal-builder on a PC, copy it to the builder's dist/ beside Robot-Manager, then rerun (or pass --vmx-hal-deb FILE)."
+  fi
+  if [ "$DRY_RUN" != 1 ] && { [ "$SKIP_PLUGIN" != 1 ] || { [ "$SKIP_DRIVERS" != 1 ] && [ ! -f /usr/local/lib/studica_drivers/libstudica_drivers.so ]; }; }; then
+    have_vmx || die "VMX HAL SDK package installed but VMXPi.h/libvmxpi_hal_cpp.so are still missing"
   fi
 }
 
@@ -342,6 +382,7 @@ validate_install_inputs() {
       || die "LSE emulator source is missing from $RM_DIR (or pass --skip-lse-emu)"
   fi
   [ -f "$RM_DIR/net/vmx_net.py" ] || die "network command source is missing from $RM_DIR"
+  [ -f "$RM_DIR/system/network_backup.py" ] || die "network backup source is missing from $RM_DIR"
   if [ "$WITH_SUDOERS" = 1 ]; then
     command -v visudo >/dev/null 2>&1 || die "visudo is required to validate --sudoers rules"
   fi
@@ -500,13 +541,48 @@ install_shim() {
   run rm -rf "$BUILD_DIR/gpio_isr_shim"
   run install -d "$BUILD_DIR" "$OPT_DIR/lib"
   run cp -r "$src" "$BUILD_DIR/gpio_isr_shim"
+  # The checkout may contain ignored binaries built for the developer PC;
+  # never let make reuse them for the robot's architecture.
+  run make -C "$BUILD_DIR/gpio_isr_shim" clean
   run make -C "$BUILD_DIR/gpio_isr_shim" CC="$BUILD_CC" test
   run make -C "$BUILD_DIR/gpio_isr_shim" CC="$BUILD_CC"
   run install -m 0755 "$BUILD_DIR/gpio_isr_shim/libvmx_gpio_isr_shim.so" "$OPT_DIR/lib/libvmx_gpio_isr_shim.so"
   if [ "$DRY_RUN" != 1 ]; then verify_shared_library "$OPT_DIR/lib/libvmx_gpio_isr_shim.so"; fi
   if [ ! -d /sys/class/gpio ]; then
-    echo "  this kernel has no /sys/class/gpio, so the HAL needs the shim. Add to $CONF_DIR/config.json:"
-    echo "    \"env\": { \"LD_PRELOAD\": \"$OPT_DIR/lib/libvmx_gpio_isr_shim.so\" }"
+    if [ "$DRY_RUN" = 1 ]; then
+      echo "  [dry-run] add $OPT_DIR/lib/libvmx_gpio_isr_shim.so to $CONF_DIR/config.json env.LD_PRELOAD"
+    else
+      python3 - "$CONF_DIR/config.json" "$OPT_DIR/lib/libvmx_gpio_isr_shim.so" <<'PY'
+import json
+import os
+import re
+import stat
+import sys
+from pathlib import Path
+
+config_path = Path(sys.argv[1])
+library = sys.argv[2]
+config = json.loads(config_path.read_text(encoding="utf-8"))
+env = config.setdefault("env", {})
+if not isinstance(env, dict):
+    raise SystemExit(f"{config_path}: env must be a JSON object")
+preload = env.get("LD_PRELOAD", "")
+if not isinstance(preload, str):
+    raise SystemExit(f"{config_path}: env.LD_PRELOAD must be a string")
+libraries = [part for part in re.split(r"[\s:]+", preload.strip()) if part]
+if library not in libraries:
+    libraries.append(library)
+env["LD_PRELOAD"] = " ".join(libraries)
+
+metadata = config_path.stat()
+temporary = config_path.with_name(config_path.name + ".tmp")
+temporary.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+os.chmod(temporary, stat.S_IMODE(metadata.st_mode))
+os.chown(temporary, metadata.st_uid, metadata.st_gid)
+os.replace(temporary, config_path)
+PY
+      echo "  configured GPIO shim in $CONF_DIR/config.json env.LD_PRELOAD"
+    fi
   fi
 }
 
@@ -517,6 +593,8 @@ install_lse_emu() {
   run rm -rf "$BUILD_DIR/lse_emu"
   run install -d "$BUILD_DIR" "$OPT_DIR/lib"
   run cp -r "$src" "$BUILD_DIR/lse_emu"
+  # As above, only use binaries freshly built for the VMX's aarch64 CPU.
+  run make -C "$BUILD_DIR/lse_emu" clean
   run make -C "$BUILD_DIR/lse_emu" CC="$BUILD_CC" test
   run make -C "$BUILD_DIR/lse_emu" CC="$BUILD_CC"
   run install -m 0755 "$BUILD_DIR/lse_emu/libvmx_lse_emu.so" "$OPT_DIR/lib/libvmx_lse_emu.so"
@@ -555,27 +633,26 @@ install_cpu_max() {
   fi
 }
 
-ssh_device() { python3 "$OPT_DIR/net/vmx_net.py" sshdevice 2>/dev/null || true; }
-
 # Makes NetworkManager the network manager (Ubuntu Server ships systemd-networkd + netplan) and sets up the Wi-Fi access
 # point and the wired port. Everything is written first, while the ssh session still works; the switch itself runs a few
 # seconds after install.sh has finished, because it ends the session.
 apply_network() {
-  local dev; dev="$(ssh_device)"
-  if [ -n "$dev" ] && [ "$FORCE_NETWORK" != 1 ]; then
-    die "this ssh session comes in over $dev, which --network changes: it will end. Reconnect through the wired port (172.22.11.2) or the robot's Wi-Fi '$AP_SSID-$AP_TEAM' (the access point), then pass --force-network. (A screen and keyboard are the safest way; --undo-network goes back.)"
-  fi
+  # Preserve the first configuration before apt can start a newly installed NM.
+  # Neither the active manager nor saved Wi-Fi profiles are changed here.
+  run python3 "$OPT_DIR/bin/network_backup.py" snapshot
 
   local missing=0
   command -v nmcli >/dev/null 2>&1 || missing=1
+  command -v ip >/dev/null 2>&1 || missing=1
   command -v iw >/dev/null 2>&1 || missing=1
   [ -x /usr/sbin/dnsmasq ] || command -v dnsmasq >/dev/null 2>&1 || missing=1   # dnsmasq-base: NetworkManager's DHCP server
   if [ "$missing" = 1 ]; then
-    apt_install_packages "network configuration tools (internet access is required)" network-manager dnsmasq-base iw
+    apt_install_packages "network configuration tools (internet access is required)" network-manager iproute2 dnsmasq-base iw
     if [ "$DRY_RUN" != 1 ]; then
       if ! command -v nmcli >/dev/null 2>&1 || ! command -v iw >/dev/null 2>&1; then
         die "network tools are still unavailable; the network was not changed"
       fi
+      command -v ip >/dev/null 2>&1 || die "iproute2 is still unavailable; the network was not changed"
       [ -x /usr/sbin/dnsmasq ] || command -v dnsmasq >/dev/null 2>&1 \
         || die "dnsmasq is still unavailable; the network was not changed"
     fi
@@ -586,14 +663,15 @@ apply_network() {
   run "$OPT_DIR/net/vmx_net.py" setupEthernet --no-activate
   run "$OPT_DIR/net/vmx_net.py" setupHotspot --no-activate "$AP_SSID" "$AP_TEAM" "$AP_BAND" "$AP_PASSWORD"
 
-  # netplan: hand every interface to NetworkManager. The old files are set aside, not deleted (--undo-network).
-  local backup; backup="/etc/netplan/w4studica-backup-$(date +%Y%m%d-%H%M%S)"
-  if ls /etc/netplan/*.yaml >/dev/null 2>&1; then
-    run install -d -m 0700 "$backup"
-    run sh -c "mv /etc/netplan/*.yaml '$backup'/"
-  fi
+  # The original is immutable across reinstalls. Only remove active YAML after
+  # dependencies are ready and the snapshot has completed successfully.
+  local yaml
+  for yaml in /etc/netplan/*.yaml; do
+    [ -f "$yaml" ] || continue
+    run rm -f "$yaml"
+  done
   write_file /etc/netplan/01-w4studica-network-manager.yaml 0600 <<'YAML'
-# Installed by W4Studica install.sh --network: NetworkManager manages the interfaces (Wi-Fi access point, wired 172.22.11.2).
+# Installed by W4Studica install.sh: NetworkManager manages the interfaces (Wi-Fi access point, wired 172.22.11.2).
 network:
   version: 2
   renderer: NetworkManager
@@ -601,28 +679,30 @@ YAML
   # cloud-init would write its own netplan file again at the next boot.
   run install -d /etc/cloud/cloud.cfg.d
   write_file /etc/cloud/cloud.cfg.d/99-w4studica-disable-network-config.cfg 0644 <<'CFG'
-# Installed by W4Studica install.sh --network: the network is configured through NetworkManager, not cloud-init.
+# Installed by W4Studica install.sh: the network is configured through NetworkManager, not cloud-init.
 network: {config: disabled}
 CFG
   run install -m 0755 "$RM_DIR/system/undo_network.sh" "$OPT_DIR/bin/undo_network.sh"
+  run install -m 0755 "$RM_DIR/system/apply_network.sh" "$OPT_DIR/bin/apply_network.sh"
 
   local address; address="$(python3 -c "import sys; t=int(sys.argv[1]); print('10.%d.%d.2' % (t//100, t%100))" "$AP_TEAM")"
-  local pw="the one you gave"; [ "$AP_PASSWORD" = password ] && pw="password"
   cat <<MSG
-  Network prepared. In 8 seconds the robot switches to NetworkManager:
+  Network prepared. In 8 seconds the robot switches to NetworkManager, applies setupHotspot and selects AP mode.
+  Saved Wi-Fi profiles are deleted:
     wired port  172.22.11.2   (a computer on the cable gets 172.22.11.X from the robot)
-    Wi-Fi       access point '$AP_SSID-$AP_TEAM'  ->  $address   (the home Wi-Fi is not used any more)
-  THIS SSH SESSION ENDS. Reconnect:
+    access point '$AP_SSID-$AP_TEAM'  ->  $address
+  This SSH session may end. Reconnect:
     - cable:  set the PC to DHCP, then   ssh $LOGIN_USER@172.22.11.2
-    - Wi-Fi:  join '$AP_SSID-$AP_TEAM' (password: $pw), then   ssh $LOGIN_USER@$address
+    - Wi-Fi:  join '$AP_SSID-$AP_TEAM' (password: password), then   ssh $LOGIN_USER@$address
   Go back (on the robot's screen and keyboard):   sudo $OPT_DIR/bin/undo_network.sh
 MSG
-  run systemd-run --unit=w4studica-network-switch --on-active=8 --description="W4Studica: switch to NetworkManager" \
-    /bin/sh -c 'netplan generate && systemctl disable --now systemd-networkd.service systemd-networkd.socket systemd-networkd-wait-online.service; systemctl enable --now NetworkManager.service'
+  run systemd-run --collect --unit=w4studica-network-switch --on-active=8 --timer-property=RemainAfterElapse=no \
+    --description="W4Studica: switch to NetworkManager" \
+    "$OPT_DIR/bin/apply_network.sh" "$AP_SSID" "$AP_TEAM" "$AP_BAND" "$AP_PASSWORD"
 }
 
 undo_network() {
-  info "Undo --network"
+  info "Undo installer network setup"
   [ -f "$RM_DIR/system/undo_network.sh" ] || die "$RM_DIR/system/undo_network.sh not found"
   run sh "$RM_DIR/system/undo_network.sh"
 }
@@ -633,16 +713,13 @@ install_network() {
   [ -f "$src" ] || { warn "$src not found; skipping the network commands"; return; }
   run install -d "$OPT_DIR/net" "$OPT_DIR/bin"
   run install -m 0755 "$src" "$OPT_DIR/net/vmx_net.py"
+  run install -m 0755 "$RM_DIR/system/network_backup.py" "$OPT_DIR/bin/network_backup.py"
   local cmd
   for cmd in setupHotspot toggleNetMode setupEthernet; do
     run ln -sf "$OPT_DIR/net/vmx_net.py" "/usr/local/bin/$cmd"
   done
   echo "  installed: setupHotspot, toggleNetMode, setupEthernet"
 
-  if [ "$APPLY_NETWORK" != 1 ]; then
-    echo "  network left as it is (add --network to apply it, see --help)"
-    return
-  fi
   apply_network
 }
 
@@ -686,7 +763,7 @@ summary() {
   lse emu:   $OPT_DIR/lib/libvmx_lse_emu.so   -> LD_AUDIT, set by robot_manager on CPUs without LSE atomics
   build:     $BUILD_CC / $BUILD_CXX and make (missing packages installed by apt; --no-install-deps disables this)
   cpu:       systemctl status robot_cpu_max      (governor performance, at every boot)
-  network:   setupHotspot SSID TEAM BAND [PASSWORD], toggleNetMode ap|wifi, setupEthernet   (add --network to apply)
+  network:   setupHotspot WorldSkills 1234 2.4 password; toggleNetMode ap; saved Wi-Fi profiles are deleted
   runtime:   ./install.sh --check-runtime-deps --user $LOGIN_USER (after GradleRIO deploy)
 WPILib/OpenCV shared libraries are deployed per project by GradleRIO; this installer checks them but does not select a global OpenCV version.
 Next: allwpilib/simulation/halsim_vmx/HARDWARE_CHECKLIST.md.
@@ -739,6 +816,7 @@ fi
 
 preflight
 ensure_base_runtime_dependencies
+ensure_vmx_hal_sdk
 validate_install_inputs
 ensure_build_dependencies
 install_robot_manager

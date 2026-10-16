@@ -6,6 +6,7 @@ section() { printf '\n== %s\n' "$1"; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
 section "OS / kernel"
+# shellcheck disable=SC1091
 . /etc/os-release 2>/dev/null && echo "$PRETTY_NAME"
 uname -r
 [ -r /proc/device-tree/model ] && tr -d '\0' < /proc/device-tree/model && echo
@@ -17,8 +18,11 @@ echo "-- routes"; ip route
 
 section "how you are connected right now"
 echo "SSH_CONNECTION=${SSH_CONNECTION:-<not over ssh>}"
-for dev in $(ls /sys/net 2>/dev/null | grep -E '^(eth|en|wlan|wl)'); do
-  echo "$dev: carrier=$(cat /sys/class/net/$dev/carrier 2>/dev/null) operstate=$(cat /sys/class/net/$dev/operstate 2>/dev/null)"
+for path in /sys/class/net/*; do
+  [ -e "$path" ] || continue
+  dev="${path##*/}"
+  case "$dev" in eth*|en*|wl*) ;; *) continue ;; esac
+  echo "$dev: carrier=$(cat "$path/carrier" 2>/dev/null) operstate=$(cat "$path/operstate" 2>/dev/null)"
 done
 
 section "services (active / enabled)"
@@ -62,8 +66,9 @@ fi
 have rfkill && { echo "-- rfkill"; rfkill list 2>&1; }
 
 section "current Wi-Fi power save"
-for dev in $(ls /sys/net 2>/dev/null | grep -E '^(wlan|wl)'); do
-  have iw && iw dev "$dev" get power_save 2>&1
+for path in /sys/class/net/wl*; do
+  [ -e "$path" ] || continue
+  have iw && iw dev "${path##*/}" get power_save 2>&1
 done
 
 section "done"

@@ -9,11 +9,16 @@ It never opens the VMX hardware itself. Standard library only; works on Python 3
 """
 
 import argparse
+from collections import deque
 import json
 import logging
 import os
 import platform
+import queue
+import select
 import re
+import socket
+import struct
 import signal
 import subprocess
 import sys
@@ -25,6 +30,7 @@ log = logging.getLogger("robot_manager")
 DEFAULT_CONFIG = "/etc/robot_manager/config.json"
 ROBOT_COMMAND_FILE = "robotCommand"
 DEFAULT_LSE_EMU_LIBRARY = "/opt/robot_manager/lib/libvmx_lse_emu.so"
+RIOLOG_PORT = 1741
 
 
 DEFAULT_STOP_GRACE = 5.0
@@ -137,7 +143,7 @@ class Manager:
     """Runs the robot command in a loop until stop() is called."""
 
     def __init__(self, command_file, cwd, env, backoff_initial=1.0, backoff_max=10.0,
-                 min_uptime=10.0, wait_poll=2.0, stop_grace=5.0, stop_signals=None):
+                 min_uptime=10.0, wait_poll=2.0, stop_grace=5.0, stop_signals=None, riolog=None):
         self.command_file = command_file
         self.cwd = cwd
         self.env = env
@@ -147,6 +153,7 @@ class Manager:
         self.wait_poll = wait_poll
         self.stop_grace = stop_grace
         self.stop_signals = list(stop_signals) if stop_signals else [signal.SIGINT, signal.SIGTERM]
+        self.riolog = riolog
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._proc = None
@@ -172,6 +179,9 @@ class Manager:
                 continue
 
             code = started.wait()
+            reader = getattr(started, "_robot_output_reader", None)
+            if reader is not None:
+                reader.join(timeout=1.0)
             uptime = time.monotonic() - self._started_at
             with self._lock:
                 self._proc = None
@@ -195,7 +205,14 @@ class Manager:
                     cwd=self.cwd,
                     env=self.env,
                     start_new_session=True,  # own process group so the whole tree can be stopped
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    bufsize=0,
                 )
+                reader = threading.Thread(target=self._forward_output, args=(self._proc,),
+                                          name="robot-output", daemon=True)
+                self._proc._robot_output_reader = reader
+                reader.start()
                 self._started_at = time.monotonic()
                 self.starts += 1
                 log.info("started robot program (pid %d)", self._proc.pid)
@@ -203,6 +220,21 @@ class Manager:
         except OSError as e:
             log.error("could not start %s: %s", self.command_file, e)
             return None
+
+    def _forward_output(self, proc):
+        """Keep systemd journal output and forward robot prints to the RioLog TCP stream."""
+        try:
+            for raw_line in iter(proc.stdout.readline, b""):
+                line = raw_line.decode("utf-8", errors="replace")
+                sys.stdout.write(line)
+                sys.stdout.flush()
+                if self.riolog is not None:
+                    self.riolog.publish(line.rstrip("\r\n"))
+        except (OSError, ValueError) as exc:
+            log.warning("could not forward robot program output: %s", exc)
+        finally:
+            if proc.stdout is not None:
+                proc.stdout.close()
 
     def stop(self):
         self._stop.set()
@@ -290,6 +322,144 @@ def _signal_group(proc, sig):
         pass
 
 
+class _RioLogClient:
+    """One bounded queue and sender per client; socket writes never run on the robot output thread."""
+
+    def __init__(self, server, sock):
+        self.server = server
+        self.socket = sock
+        self.pending = queue.Queue(maxsize=server.queue_limit)
+        self.stopped = threading.Event()
+        self.thread = threading.Thread(target=self._run, name="riolog-client", daemon=True)
+
+    def close(self):
+        if self.stopped.is_set():
+            return
+        self.stopped.set()
+        try:
+            self.socket.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        self.socket.close()
+
+    def _run(self):
+        try:
+            while not self.stopped.is_set():
+                readable, _, _ = select.select([self.socket], [], [], 0)
+                if readable and not self.socket.recv(1024):
+                    break
+                try:
+                    frame = self.pending.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                self.socket.sendall(frame)
+        except (OSError, ValueError):
+            pass
+        finally:
+            self.close()
+            with self.server._lock:
+                self.server._clients.discard(self)
+
+
+class RioLogServer:
+    """Serve NetConsole TCP frames without letting slow clients stall robot stdout."""
+
+    def __init__(self, port=RIOLOG_PORT, history=200, queue_limit=256, max_clients=8):
+        self.port = int(port)
+        self.history = deque(maxlen=max(0, int(history)))
+        self.queue_limit = max(1, int(queue_limit))
+        self.max_clients = max(1, int(max_clients))
+        self._clients = set()
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._server = None
+        self._sequence = 0
+        self._thread = threading.Thread(target=self._serve, name="riolog-server", daemon=True)
+
+    def start(self):
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        if self._server is not None:
+            self._server.close()
+        with self._lock:
+            clients = tuple(self._clients)
+            self._clients.clear()
+        for client in clients:
+            client.close()
+        if self._thread.is_alive():
+            self._thread.join(timeout=1.0)
+        for client in clients:
+            client.thread.join(timeout=1.0)
+
+    @staticmethod
+    def _frame(line, sequence):
+        text = line.encode("utf-8", errors="replace")[:0xFFFF - 3 - 6]
+        payload = struct.pack(">fh", time.monotonic(), sequence) + text
+        inner_length = 1 + len(payload)
+        return struct.pack(">HHB", inner_length + 2, inner_length, 12) + payload
+
+    def publish(self, line):
+        stale = []
+        with self._lock:
+            sequence = self._sequence
+            self._sequence = (self._sequence + 1 + 0x8000) % 0x10000 - 0x8000
+            frame = self._frame(line, sequence)
+            if self.history.maxlen:
+                self.history.append(frame)
+            for client in tuple(self._clients):
+                try:
+                    client.pending.put_nowait(frame)
+                except queue.Full:
+                    self._clients.discard(client)
+                    stale.append(client)
+        # Drop lagging clients instead of dropping arbitrary bytes from a framed stream.
+        for client in stale:
+            client.close()
+
+    def _add_client(self, sock):
+        sock.settimeout(1.0)
+        client = _RioLogClient(self, sock)
+        with self._lock:
+            if self._stop.is_set() or len(self._clients) >= self.max_clients:
+                client.close()
+                return None
+            # Register history and live frames under the same lock to preserve order.
+            for frame in tuple(self.history)[-self.queue_limit:]:
+                client.pending.put_nowait(frame)
+            self._clients.add(client)
+            # Start before releasing the lock so stop() always sees a started thread.
+            client.thread.start()
+        return client
+
+    def _serve(self):
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._server = server
+        try:
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server.bind(("0.0.0.0", self.port))
+            server.listen(4)
+            server.settimeout(0.5)
+            log.info("RioLog console listening on TCP port %d", server.getsockname()[1])
+            while not self._stop.is_set():
+                try:
+                    sock, address = server.accept()
+                except socket.timeout:
+                    continue
+                except OSError:
+                    if self._stop.is_set():
+                        break
+                    raise
+                if self._add_client(sock) is not None:
+                    log.info("RioLog client connected from %s:%d", *address)
+        except OSError as exc:
+            if not self._stop.is_set():
+                log.error("RioLog console could not listen on TCP port %d: %s", self.port, exc)
+        finally:
+            server.close()
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Run and supervise the VMX robot program.")
     parser.add_argument("--config", default=DEFAULT_CONFIG, help="path to config.json (default: %(default)s)")
@@ -301,8 +471,14 @@ def main(argv=None):
     env = build_environment(config, platform.release(), has_lse=cpu_has_lse())
     command_file = config.get("robot_command") or os.path.join(config["robot_home"], ROBOT_COMMAND_FILE)
 
+    riolog = None
+    if config.get("riolog_enabled", True):
+        riolog = RioLogServer(port=config.get("riolog_port", RIOLOG_PORT),
+                              history=config.get("riolog_history", 200))
+        riolog.start()
+
     manager = Manager(command_file, config["robot_home"], env, stop_grace=stop_grace_from_config(config),
-                      stop_signals=stop_signals_from_config(config))
+                      stop_signals=stop_signals_from_config(config), riolog=riolog)
 
     stop_threads = []
 
@@ -321,6 +497,8 @@ def main(argv=None):
 
     log.info("robot_manager starting; command: %s", command_file)
     manager.run()
+    if riolog is not None:
+        riolog.stop()
     for thread in list(stop_threads):
         thread.join()
     log.info("robot_manager stopped")

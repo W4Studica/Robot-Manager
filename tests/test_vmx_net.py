@@ -258,7 +258,7 @@ class HotspotTest(NetTestCase):
 
 
 class BeforeNetworkManagerTest(NetTestCase):
-    """install.sh --network writes the connection files first and lets NetworkManager start afterwards."""
+    """install.sh writes the connection files first and lets NetworkManager start afterwards."""
 
     def test_the_interfaces_are_found_without_nmcli(self):
         system = FakeSystem(nmcli_missing=True)

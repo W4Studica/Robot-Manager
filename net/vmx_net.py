@@ -336,7 +336,7 @@ def setup_hotspot(system, ssid_prefix, team, band, password, channel=None, force
     if not system.is_root():
         raise NetError("run it with sudo")
     if apply and not network_manager_active(system):
-        raise NetError("NetworkManager is not running; this needs it (see install.sh --network)")
+        raise NetError("NetworkManager is not running; install.sh configures it automatically")
     team_to_address(team)  # validates the team number before anything else uses it
     nm_band = band_to_nm(band)
     check_wpa_password(password)
