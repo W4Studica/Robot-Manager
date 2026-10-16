@@ -397,8 +397,7 @@ class RioLogServer:
     def _frame(line, sequence):
         text = line.encode("utf-8", errors="replace")[:0xFFFF - 3 - 6]
         payload = struct.pack(">fh", time.monotonic(), sequence) + text
-        inner_length = 1 + len(payload)
-        return struct.pack(">HHB", inner_length + 2, inner_length, 12) + payload
+        return struct.pack(">HB", len(payload) + 1, 12) + payload
 
     def publish(self, line):
         stale = []

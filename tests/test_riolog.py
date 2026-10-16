@@ -20,10 +20,11 @@ def receive(sock):
         return data
     size = struct.unpack(">H", exact(2))[0]
     frame = exact(size)
-    inner, kind, _timestamp, sequence = struct.unpack(">HBfh", frame[:9])
-    if inner != size - 2 or kind != 12:
+    kind = frame[0]
+    _timestamp, sequence = struct.unpack(">fh", frame[1:7])
+    if kind != 12:
         raise AssertionError("invalid NetConsole framing")
-    return sequence, frame[9:].decode()
+    return sequence, frame[7:].decode()
 
 
 class BlockedSocket:
