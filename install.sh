@@ -18,17 +18,17 @@
 #                         systemd service robot_manager (enabled and restarted); serves RioLog on TCP 1741
 #   2. RioLog discovery   Avahi publishes robot.local, the hostname used by WPILib's RioLog client
 #   3. VMX HAL SDK         installs vmxpi-hal .deb from the sibling builder's dist/ when headers/libs are missing
-#   3. studica_drivers    built with Studica's Makefile, copied into /usr/local (needs g++, make, VMXPi.h)
-#   4. Studica plugin     /opt/halsim_vmx/libhalsim_vmx_studica.so for halsim_vmx (needs g++ >= 11, VMXPi.h)
-#   5. GPIO interrupt shim /opt/robot_manager/lib/libvmx_gpio_isr_shim.so (needs gcc and make). Fixes
+#   4. studica_drivers    built with Studica's Makefile, copied into /usr/local (needs g++, make, VMXPi.h)
+#   5. Studica plugin     /opt/halsim_vmx/libhalsim_vmx_studica.so for halsim_vmx (needs g++ >= 11, VMXPi.h)
+#   6. GPIO interrupt shim /opt/robot_manager/lib/libvmx_gpio_isr_shim.so (needs gcc and make). Fixes
 #                         "RPI GPIO Interrupt Enable: PI_BAD_ISR_INIT" on kernels without GPIO sysfs
-#   6. LSE atomics emulation /opt/robot_manager/lib/libvmx_lse_emu.so (needs gcc and make). Lets WPILib's libMrcLib
+#   7. LSE atomics emulation /opt/robot_manager/lib/libvmx_lse_emu.so (needs gcc and make). Lets WPILib's libMrcLib
 #                         (SystemCore build, uses ARMv8.1 atomics) run on a Pi 4; robot_manager turns it on by itself
-#   7. CPU at full speed /opt/robot_manager/bin/robot_cpu_max.sh + robot_cpu_max.service: governor "performance" and the
+#   8. CPU at full speed /opt/robot_manager/bin/robot_cpu_max.sh + robot_cpu_max.service: governor "performance" and the
 #                         minimum frequency raised to the maximum, at every boot (a 20 ms robot loop should not wait for the clock)
-#   8. network             configures the WorldSkills-1234 Wi-Fi access point and wired port 172.22.11.2;
+#   9. network             configures the WorldSkills-1234 Wi-Fi access point and wired port 172.22.11.2;
 #                         after NetworkManager starts, selects AP mode and deletes saved Wi-Fi profiles
-#   9. sudoers (opt-in)   lets the login user run the few sudo commands `gradlew deploy` uses, without a password
+#  10. sudoers (opt-in)   lets the login user run the few sudo commands `gradlew deploy` uses, without a password
 #
 # WPILib/CameraServer/cscore/OpenCV native libraries are deployed per robot project by GradleRIO from
 # that project's pinned dependency graph. The Linux UVC camera interface is provided by the kernel (V4L2);
@@ -107,7 +107,7 @@ while [ $# -gt 0 ]; do
     --robot-home) [ $# -ge 2 ] || die "--robot-home needs a value"; ROBOT_HOME="$2"; shift ;;
     --robot-manager-dir) [ $# -ge 2 ] || die "--robot-manager-dir needs a value"; RM_DIR="$2"; shift ;;
     --allwpilib-dir) [ $# -ge 2 ] || die "--allwpilib-dir needs a value"; AW_DIR="$2"; shift ;;
-    --vmx-hal-deb) [ $# -ge 2 ] || die "--vmx-hal-deb needs a value"; VMX_HAL_DEB="$2"; shift ;;
+    --vmx-hal-deb) [ $# -ge 2 ] || die "--vmx-hal-deb needs a value"; VMX_HAL_DEB="$(realpath -m -- "$2")"; shift ;;
     --sudoers) WITH_SUDOERS=1 ;;
     --detach) DETACH_INSTALL=1 ;;
     --_run-detached) RUNNING_DETACHED=1 ;;
