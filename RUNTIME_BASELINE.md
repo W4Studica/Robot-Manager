@@ -14,7 +14,7 @@ combination. An inventory records identity; it does not establish compatibility.
 | GradleRIO upstream commit | `0ea36d4` |
 | Studica drivers source | ROS2 `f97edec`, copied without driver edits |
 | Required adaptations | GPIO character-device shim; `LD_AUDIT` LSE emulation |
-| ISO identity / SHA-256 | Not recorded yet; no finalized W4Studica ISO is claimed |
+| ISO identity / SHA-256 | The image is distributed by download link (the site's VMX-Pi Setup page). Its name and SHA-256 are not recorded here yet; publish the SHA-256 next to the link |
 | SDK / deployed library SHA-256 | Must be captured on the robot for each release |
 
 Baseline facts above come from the existing 2026-10-10/11 hardware record. A newer
@@ -34,7 +34,8 @@ python3 system/runtime_inventory.py \
 
 This reads OS versions, SDK headers and native libraries without opening VMX or
 reading network profiles or passwords. It exits nonzero if required files are
-missing. If the image digest is unknown, omit `--image-sha256`; JSON records `null`
+missing (the VMX headers and HAL, the Studica plugin, one `libhalsim_vmx[d].so` and one `libwpiHal[d].so`; the build type
+decides which of each pair is deployed, and `libstudica_drivers.so` is optional). If the image digest is unknown, omit `--image-sha256`; JSON records `null`
 rather than inventing a digest. The original ISO can be hashed on the **PC** with
 `sha256sum /path/to/image.iso`. Do not upload the image, HAL or SDK with the record.
 

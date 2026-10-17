@@ -31,9 +31,16 @@ def version(args):
 def collect(sdk, runtime, image_id, image_sha256, release):
     headers = sdk / "usr/local/include/vmxpi"
     hal = sdk / "usr/local/lib/vmxpi/libvmxpi_hal_cpp.so"
-    required = [headers / "VMXPi.h", hal] + [runtime / name for name in (
-        "libhalsim_vmx.so", "libhalsim_vmxd.so", "libhalsim_vmx_studica.so",
-        "libstudica_drivers.so", "libwpiHal.so", "libwpiHald.so")]
+    # A release deploy has one build type: libhalsim_vmx.so with libwpiHal.so, or libhalsim_vmxd.so with libwpiHald.so.
+    # libstudica_drivers.so exists only when the Studica drivers are deployed as a separate library (the release layout);
+    # the example project links them into the plugin. So each entry is "any of these", and the drivers are not required.
+    required_groups = [
+        [headers / "VMXPi.h"],
+        [hal],
+        [runtime / "libhalsim_vmx_studica.so"],
+        [runtime / "libhalsim_vmx.so", runtime / "libhalsim_vmxd.so"],
+        [runtime / "libwpiHal.so", runtime / "libwpiHald.so"],
+    ]
     paths = set(headers.rglob("*.h")) | {hal} | set(runtime.glob("*.so*"))
     return {
         "schemaVersion": 1,
@@ -47,7 +54,8 @@ def collect(sdk, runtime, image_id, image_sha256, release):
                "java": version(["java", "-version"]), "compiler": version(["g++", "--version"]),
                "gpioSysfs": Path("/sys/class/gpio").exists()},
         "files": {str(path): fingerprint(path) for path in sorted(paths) if path.is_file()},
-        "missingRequired": [str(path) for path in required if not path.is_file()],
+        "missingRequired": [" or ".join(str(path) for path in group) for group in required_groups
+                            if not any(path.is_file() for path in group)],
     }
 
 
