@@ -1,77 +1,50 @@
 # gpio_isr_shim
 
-`LD_PRELOAD` 라이브러리. Studica VMX HAL(`libvmxpi_hal_cpp.so`) 안의 pigpio가 GPIO 인터럽트를 sysfs GPIO(`/sys/class/gpio`)로 구현하기 때문에,
-**sysfs GPIO가 없는 커널**에서는 HAL을 열 때 이런 메시지가 나온다.
+`LD_PRELOAD` library for kernels without sysfs GPIO. The pigpio inside the Studica VMX HAL (`libvmxpi_hal_cpp.so`) implements GPIO interrupts through `/sys/class/gpio`. The development VMX (Ubuntu 26.04, kernel `7.0.0-1020-raspi`) has `# CONFIG_GPIO_SYSFS is not set`, so opening the HAL prints
 
 ```
 RPI GPIO Interrupt Enable:  PI_BAD_ISR_INIT.
 ```
 
-개발용 VMX(Ubuntu 26.04, 커널 `7.0.0-1020-raspi`)는 `# CONFIG_GPIO_SYSFS is not set`이고 `/sys/class/gpio`가 없다. `strace`로 HAL이
-`/sys/class/gpio/export`를 3번 열려다 `ENOENT`로 실패하는 것을 확인했다(메시지 3번과 일치).
+(three times: `strace` shows the HAL failing to open `/sys/class/gpio/export`).
 
-## 무엇을 하는가
+## What it does
 
-HAL은 `gpioSetISRFunc` / `gpioSetISRFuncEx`를 PLT로 호출하고(`R_AARCH64_JUMP_SLOT`) 이 심볼들은 라이브러리가 내보낸다(`nm -D`로 확인).
-그래서 이 shim이 두 함수와 `gpioTerminate`를 대체한다.
+The HAL calls `gpioSetISRFunc` and `gpioSetISRFuncEx` through the PLT, so the shim replaces them, and `gpioTerminate`:
 
-- 에지 이벤트는 **GPIO 문자 장치**(`/dev/gpiochip0`, uAPI v2)로 받는다.
-- 콜백 규약은 `pigpio.h`와 같다: `(gpio, level, tick)`. `level` 0=하강, 1=상승, 2=타임아웃(`timeout` ms 동안 에지 없음), `tick`은 `gpioTick()`(마이크로초).
-- GPIO마다 스레드 하나. `f == NULL`이면 취소. 같은 GPIO에 다시 설정하면 교체.
-- 반환값: 성공 0, GPIO 범위 밖 `PI_BAD_GPIO`(-3), 에지 값 오류 `PI_BAD_EDGE`(-122), 문자 장치를 못 열거나 줄 요청이 실패하면 `PI_BAD_ISR_INIT`(-123).
-- `/sys/class/gpio`가 **있으면** 원래 함수로 넘긴다(다른 환경에 영향 없음). `VMX_GPIO_SHIM_FORCE=1`이면 항상 이 구현을 쓴다.
-- `gpioTerminate`에서 ISR 스레드를 먼저 멈춘 뒤 원래 함수를 부른다.
-- `VMX_GPIO_SHIM_DEBUG=1`이면 모든 호출을 stderr에 기록한다(HAL이 어떤 GPIO를 어떤 에지로 요청하는지 볼 수 있다).
+- Edge events come from the **GPIO character device** (`/dev/gpiochip0`, uAPI v2). `gpiochip0` is the SoC GPIO controller on a Pi 4.
+- The callback contract is pigpio's: `(gpio, level, tick)`; `level` 0 falling, 1 rising, 2 timeout (no edge for `timeout` ms); `tick` is `gpioTick()` in microseconds. One thread per GPIO. `f == NULL` cancels; setting the same GPIO again replaces. A callback may cancel its own GPIO.
+- Return values: 0 on success, `PI_BAD_GPIO` (-3) for a GPIO out of range, `PI_BAD_EDGE` (-122) for a bad edge, `PI_BAD_ISR_INIT` (-123) if the device cannot be opened or the line request fails.
+- If `/sys/class/gpio` **exists**, the calls go to the original functions (`VMX_GPIO_SHIM_FORCE=1` always uses this implementation).
+- `gpioTerminate` stops the ISR threads first, then calls the original. The original is looked up with `dlsym(RTLD_NEXT)` and, if that fails (the Studica plugin loads the HAL with `dlopen(RTLD_LOCAL)`), by the already loaded library's name (`VMX_GPIO_SHIM_REAL_LIB`, default `libvmxpi_hal_cpp.so`). Without that fallback `gpioTerminate` was never forwarded and the program hung in `exit()`.
+- `VMX_GPIO_SHIM_DEBUG=1` logs every call to stderr.
 
-## 빌드, 테스트
+## Build, test, use
 
 ```bash
 make        # libvmx_gpio_isr_shim.so
-make test   # GPIO 하드웨어 없이 돈다: 문자 장치 자리에 파이프를 끼워서 콜백 규약을 검사한다
+make test   # needs no GPIO hardware: a pipe replaces the character device
 ```
 
-테스트 13개: 상승/하강, 에지 인자 전달, 타임아웃(level 2), `timeout=0`이면 타임아웃 없음, `userdata`, 취소, 교체, GPIO 독립성,
-인자 오류 코드, 요청 실패 후 복구, `gpioTerminate`, 이벤트 연속 도착 시 순서와 누락, 콜백 안에서 자기 자신을 취소(교착 방지).
-ThreadSanitizer(0건), AddressSanitizer, UBSan으로도 통과시켰다(TSan이 종료 플래그의 데이터 레이스를 찾아서 `atomic_int`로 고쳤다).
+The tests cover rising and falling edges, arguments, timeouts, `userdata`, cancel, replace, independence of GPIOs, error codes, recovery after a failed request, `gpioTerminate`, ordering under bursts, cancelling from inside the callback, and a HAL loaded with `dlopen(RTLD_LOCAL)`. They also pass under ThreadSanitizer, AddressSanitizer and UBSan.
 
-## 사용
-
-`robot_manager`의 `config.json`에서 로봇 프로그램의 환경으로 준다(`install.sh`가 `/opt/robot_manager/lib/`에 설치한다).
+`install.sh` builds it to `/opt/robot_manager/lib/libvmx_gpio_isr_shim.so` and, when `/sys/class/gpio` is absent, puts it in `config.json`:
 
 ```json
 { "env": { "LD_PRELOAD": "/opt/robot_manager/lib/libvmx_gpio_isr_shim.so" } }
 ```
 
-수동으로 시험할 때는 `sudo`가 `LD_PRELOAD`를 지우므로 `env`를 거친다:
+For a manual run use `sudo env LD_PRELOAD=... ./program` (`sudo` clears `LD_PRELOAD`).
 
-```bash
-sudo env VMX_GPIO_SHIM_DEBUG=1 LD_PRELOAD=/opt/robot_manager/lib/libvmx_gpio_isr_shim.so ./vmx_n 1
-```
+## Measured on the robot (2026-10-10, Pi 4, kernel 7.0)
 
-## 로봇에서 확인한 것 (2026-10-10, Ubuntu 26.04 / 커널 7.0 / Pi 4)
+- The `PI_BAD_ISR_INIT` lines are gone. The HAL asks for GPIO 13, 6 and 12, all falling edge, no timeout; all requests succeed.
+- Falling edges arrive on GPIO 12 about every 20 ms (50 Hz, matching `VMXPi(true, 50)`; probably the VMX board's "data ready" signal). GPIO 6 and 13 were not seen to fire.
+- A complete run exits with code 0, zero SPI write CRC mismatches and failures.
 
-`sudo env VMX_GPIO_SHIM_DEBUG=1 LD_PRELOAD=... ./vmx_n 1` 결과:
+## Limits
 
-- `RPI GPIO Interrupt Enable:  PI_BAD_ISR_INIT.` 3줄이 **사라졌다.**
-- HAL이 요청한 인터럽트: **GPIO 13, 6, 12, 모두 `edge=1`(하강), `timeout=0`.**
-- 요청이 전부 성공했고(`cannot request` 없음), GPIO 12에서 **하강 에지가 약 20 ms 간격(50 Hz)으로 계속 도착**한다. `VMXPi(true, 50)`의 50 Hz와 일치하므로 VMX 보드의 "데이터 준비됨" 신호로 보인다.
-- 보드 통신(`Established communication with VMX board ...`), navX 인식, `IsOpen: 1`은 그대로.
-- **끝까지 실행(디버그 로그 없이):** 정상 종료(`VMX HAL:  pigpio library closed.`, 종료 코드 0). 쓰기 19회에 `Write CRC Mismatches: 0`/`Write Failures: 0`, 읽기 9051회에 실패 0. `gpioTerminate`를 가로채서 ISR 스레드를 먼저 멈추는 것도 문제없이 동작했다.
-- 아직 확인 못 한 것: GPIO 6/13에서 에지가 오는지(이 실행에서는 12만 도착), 이 인터럽트가 HAL의 어떤 기능에 쓰이는지, shim 유무에 따른 동작 차이(이전에도 통신은 정상이었다).
-
-## 로봇에서 발견한 버그와 수정 (2026-10-10)
-
-처음 버전은 `gpioTerminate`에서 `dlsym(RTLD_NEXT, ...)`로 원래 함수를 찾았다. Studica 플러그인이 HAL을 `dlopen(RTLD_LOCAL)`로 불러오면 HAL(과 그 안의 pigpio)은 전역 검색 범위 밖에 있어서
-`RTLD_NEXT`가 `NULL`을 돌려주고, **진짜 `gpioTerminate`가 호출되지 않았다.** pigpio의 스레드(`pthAlertThread`, `pthFifoThread`, `pthSocketThread`)가 계속 살아 있었고,
-그중 FIFO 스레드가 `fgets`에서 stdio 락을 잡은 채 대기해서 `exit()`의 `_IO_flush_all`이 영원히 멈췄다(`gdb`의 `thread apply all bt`로 확인). HAL을 직접 링크한 프로그램(`vmx_n`)은 전역 범위라 문제가 없었다.
-수정: `RTLD_NEXT`가 실패하면 이미 로드된 HAL 라이브러리를 이름으로 찾는다(`dlopen(..., RTLD_NOLOAD)`, 이름은 `VMX_GPIO_SHIM_REAL_LIB`, 기본 `libvmxpi_hal_cpp.so`).
-또 `gpioTick` 탐색의 실패를 영구 캐시하던 것도 고쳤다(성공만 캐시). 테스트가 이 상황(가짜 HAL을 `dlopen(RTLD_LOCAL)`로 로드)을 재현한다. 원래 함수를 끝내 못 찾으면 stderr에 경고를 낸다.
-
-## 알려진 한계
-
-- PC에서는 콜백 규약만 검증했고, 실제 에지 도착은 위처럼 로봇에서 확인했다(위의 "아직 확인 못 한 것" 제외).
-- 커널에 줄을 요청하면 그 핀이 GPIO 입력으로 잡힌다. HAL이 같은 핀을 다른 용도로 쓰면 충돌(`EBUSY`)하거나 핀 기능이 바뀔 수 있다.
-  충돌하면 `PI_BAD_ISR_INIT`이 그대로 나오므로(전과 같음) 나빠지지는 않는다. `VMX_GPIO_SHIM_DEBUG=1`로 원인(errno)을 볼 수 있다.
-- HAL이 인터럽트로 무엇을 하는지(어떤 기능이 이 인터럽트에 의존하는지)는 아직 모른다. HAL의 `comm ready` 핸드셰이크는 이미 문자 장치로 동작한다(SPI 통신은 정상).
-- 콜백은 GPIO별 스레드에서 실행된다. 콜백 안에서 `gpioSetISRFunc`로 자기 자신을 취소하는 것은 지원한다(다른 GPIO를 취소/교체하면서 서로를 기다리는 경우는 지원하지 않는다).
-- 리눅스 전용.
+- Asking the kernel for a line makes that pin a GPIO input. If the HAL uses the same pin differently the request fails (`EBUSY`) and `PI_BAD_ISR_INIT` returns, as without the shim; `VMX_GPIO_SHIM_DEBUG=1` shows the errno.
+- What the HAL uses these interrupts for is unknown; its `comm ready` handshake works.
+- Cancelling or replacing a different GPIO from a callback while another thread does the same can deadlock.
+- Linux only.
