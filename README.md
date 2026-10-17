@@ -1,6 +1,6 @@
 # robot_manager
 
-A service that runs continuously on the VMX-pi and replaces the roboRIO robot-program startup model (`robot` service). It is a single Python 3 script that uses only the standard library (Python 3.10 or later; works with the version included in Ubuntu 22.04).
+A service that runs continuously on the VMX-pi and replaces the roboRIO robot-program startup model (`robot` service). It is a single Python 3 script that uses only the standard library (Python 3.10 or later; the fixed development image has Python 3.14).
 
 ## What it does
 
@@ -30,7 +30,7 @@ This `LD_PRELOAD` library fixes `RPI GPIO Interrupt Enable: PI_BAD_ISR_INIT.` on
 { "env": { "LD_PRELOAD": "/opt/robot_manager/lib/libvmx_gpio_isr_shim.so" } }
 ```
 
-See [gpio_isr_shim/README.md](gpio_isr_shim/README.md) for details and limitations. **Only the callback contract has been tested on a PC; the shim has not been verified on hardware.**
+See [gpio_isr_shim/README.md](gpio_isr_shim/README.md) for details and limitations. Verified on the development VMX-pi (Ubuntu 26.04, kernel 7.0): `PI_BAD_ISR_INIT` no longer occurs and DIO input works through the shim.
 
 ## LSE atomic instruction emulation (`lse_emu/`)
 
@@ -78,7 +78,7 @@ If an older installation has only `/etc/netplan/w4studica-backup-*`, the install
 
 `setupHotspot`, `toggleNetMode`, and `setupEthernet` do not refuse changes that disconnect the current SSH session. The robot applies them itself through `systemd-run` after 3 seconds, so they complete after the session drops (`--force` is unnecessary and accepted only for compatibility). Reconnect on the new network. `--no-activate` for `setupHotspot`/`setupEthernet` writes connection files without activating them, for use when `install.sh` prepares settings in advance. The setup uses NetworkManager's `shared` mode.
 
-**Tested on a PC only:** 39 unit tests with a mocked NetworkManager and `install.sh --dry-run`. **Not yet run on a robot.** Inspect the robot's current configuration with the read-only `system/network_probe.sh`. On the development robot (2026-10-11), systemd-networkd and netplan were present; NetworkManager, hostapd, dnsmasq, and iw were absent.
+**Verified on the robot (2026-10-11):** the access point, 5 GHz, SSID change and the delayed apply (`systemd-run`). **Not verified:** the wired path, and the installer's newer NetworkManager switch-over with backup/`--undo-network`. PC tests use a mocked NetworkManager and `install.sh --dry-run`. Inspect the robot's current configuration with the read-only `system/network_probe.sh`. On the development robot before installation (2026-10-11), systemd-networkd and netplan were present; NetworkManager, hostapd, dnsmasq, and iw were absent.
 
 Backup/restore and package-failure paths are regression-tested using temporary files and fake service commands. Actual network switching and rollback after reinstall still need verification on the fixed image. Follow [RUNTIME_BASELINE.md](RUNTIME_BASELINE.md) for recording the OS/SDK/runtime combination.
 
@@ -160,8 +160,8 @@ GradleRIO `VmxPi` defaults `serviceName` to `robot_manager`, so `./gradlew deplo
 python3 -m unittest discover -s tests -v
 ```
 
-The 13 tests cover profile selection/precedence, running a command without a shebang, environment-variable passing, crash restarts, waiting for a missing command file, process-tree shutdown, forcing down a program that ignores `SIGTERM`, and terminating a real executable with `SIGTERM`.
+The suite (`tests/`: `test_robot_manager`, `test_riolog`, `test_vmx_net`, `test_network_backup`, `test_system`, `test_installer_apt`, `test_runtime_inventory`) covers profile selection/precedence, running a command without a shebang, environment-variable passing, crash restarts, waiting for a missing command file, process-tree shutdown, forcing down a program that ignores `SIGTERM`, and terminating a real executable with `SIGTERM`, RioLog framing/clients, the network commands with a mocked NetworkManager, network backup/restore, and apt-lock/dependency handling. Run it for the current count.
 
 ## Status
 
-Tested on a PC only. The systemd unit and behavior on a physical VMX-pi are **not verified**.
+Verified on a physical VMX-pi (2026-10-10 to 11): the service, `SIGINT`-first shutdown, automatic `LD_AUDIT`, the GPIO shim and deploy. **Not verified on hardware:** restart back-off and child cleanup, the `kill -TERM` path, RioLog (added 2026-10-15/16), the CPU-performance service after a reboot, and the installer's newer network switch-over. Kernel profiles stay empty because the OS image is fixed.
