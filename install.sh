@@ -418,6 +418,12 @@ check_deployed_wpilib_runtime() {
   if [ -d "$lib_dir" ]; then
     mapfile -d '' -t libraries < <(find "$lib_dir" -type f \( -name '*.so' -o -name '*.so.*' \) ! -name '*.debug' -print0)
     for library in "${libraries[@]}"; do
+      # The debug HAL extension needs libwpiHald/libwpiutild, which only a debug deploy has. A release deploy ships both
+      # extensions but not those libraries, and the program never loads the debug one then.
+      if [ "$(basename "$library")" = libhalsim_vmxd.so ] && [ ! -f "$lib_dir/libwpiHald.so" ]; then
+        echo "  skipping libhalsim_vmxd.so: this is a release deploy (no libwpiHald.so)"
+        continue
+      fi
       verify_shared_library "$library" "$search_path"
       count=$((count + 1))
     done
@@ -828,6 +834,7 @@ install_lse_emu
 install_cpu_max
 install_network
 install_sudoers
-check_deployed_wpilib_runtime
+# A library problem in the deployed program is reported, but must not stop the service from being restarted.
+( check_deployed_wpilib_runtime ) || warn "deployed libraries have unresolved dependencies (see above); robot_manager is restarted anyway"
 restart_service
 summary
