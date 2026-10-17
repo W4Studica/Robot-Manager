@@ -126,7 +126,9 @@ def lse_emulation_env(config, has_lse, env):
 
 
 def build_environment(config, kernel_release, base_env=None, has_lse=None):
-    """os.environ < LSE emulation < config 'env' < matched profile 'env'. Values are converted to str."""
+    """os.environ < config 'env' < LSE emulation (only when LD_AUDIT is not already set) < matched profile 'env'.
+
+    Values are converted to str."""
     env = dict(os.environ if base_env is None else base_env)
     env.update({k: str(v) for k, v in config.get("env", {}).items()})
     env.update(lse_emulation_env(config, has_lse, env))
@@ -191,8 +193,13 @@ class Manager:
                 break
             log.warning("robot program exited with code %s after %.1fs", code, uptime)
             # A program that ran for a while was healthy: restart quickly. A crash loop backs off.
-            backoff = self.backoff_initial if uptime >= self.min_uptime else min(backoff * 2, self.backoff_max)
-            self._stop.wait(backoff)
+            if uptime >= self.min_uptime:
+                backoff = self.backoff_initial
+                delay = backoff
+            else:  # a crash loop: wait the current delay (the first one is backoff_initial), then double it for next time
+                delay = backoff
+                backoff = min(backoff * 2, self.backoff_max)
+            self._stop.wait(delay)
 
     def _start(self):
         try:
@@ -222,16 +229,32 @@ class Manager:
             return None
 
     def _forward_output(self, proc):
-        """Keep systemd journal output and forward robot prints to the RioLog TCP stream."""
+        """Keep systemd journal output and forward robot prints to the RioLog TCP stream.
+
+        The pipe is always read until the program closes it: if this thread stopped reading and closed its end, the
+        robot program would get SIGPIPE on its next print and could die because of the console, not because of a bug.
+        A failing journal or RioLog is reported once and then skipped.
+        """
+        journal_ok = True
+        riolog_ok = self.riolog is not None
         try:
             for raw_line in iter(proc.stdout.readline, b""):
                 line = raw_line.decode("utf-8", errors="replace")
-                sys.stdout.write(line)
-                sys.stdout.flush()
-                if self.riolog is not None:
-                    self.riolog.publish(line.rstrip("\r\n"))
+                if journal_ok:
+                    try:
+                        sys.stdout.write(line)
+                        sys.stdout.flush()
+                    except (OSError, ValueError) as exc:
+                        journal_ok = False
+                        log.warning("could not write robot program output to the journal: %s", exc)
+                if riolog_ok:
+                    try:
+                        self.riolog.publish(line.rstrip("\r\n"))
+                    except Exception as exc:  # the console must never take the robot program down
+                        riolog_ok = False
+                        log.warning("RioLog forwarding stopped: %s", exc)
         except (OSError, ValueError) as exc:
-            log.warning("could not forward robot program output: %s", exc)
+            log.warning("could not read robot program output: %s", exc)
         finally:
             if proc.stdout is not None:
                 proc.stdout.close()

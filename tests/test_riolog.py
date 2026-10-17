@@ -1,7 +1,9 @@
 import os
+import shutil
 import socket
 import struct
 import sys
+import tempfile
 import threading
 import unittest
 
@@ -115,6 +117,51 @@ class RioLogTest(unittest.TestCase):
             self.server.publish(str(index))
         _, receiver = self.connect()
         self.assertEqual([receive(receiver)[1] for _ in range(2)], ["8", "9"])
+
+
+class ForwardOutputTest(unittest.TestCase):
+    """A failing console must never stop the robot program's output from being read (SIGPIPE would kill it)."""
+
+    def run_program(self, riolog):
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
+        command = os.path.join(directory, "robotCommand")
+        with open(command, "w", encoding="utf-8") as f:
+            f.write("i=0; while [ $i -lt 200 ]; do echo line$i; i=$((i+1)); done\n")
+        manager = rm.Manager(command, directory, dict(os.environ), riolog=riolog)
+        proc = manager._start()
+        self.assertIsNotNone(proc)
+        reader = proc._robot_output_reader
+        reader.join(timeout=10)
+        self.assertFalse(reader.is_alive())
+        return proc.wait(timeout=10)
+
+    def test_program_finishes_when_riolog_raises(self):
+        class BrokenRioLog:
+            calls = 0
+
+            def publish(self, line):
+                BrokenRioLog.calls += 1
+                raise RuntimeError("broken")
+
+        self.assertEqual(self.run_program(BrokenRioLog()), 0)
+        self.assertEqual(BrokenRioLog.calls, 1)  # reported once, then skipped
+
+    def test_program_finishes_when_the_journal_write_fails(self):
+        class BrokenStdout:
+            def write(self, text):
+                raise OSError("journal gone")
+
+            def flush(self):
+                pass
+
+        original = sys.stdout
+        sys.stdout = BrokenStdout()
+        try:
+            code = self.run_program(None)
+        finally:
+            sys.stdout = original
+        self.assertEqual(code, 0)
 
 
 if __name__ == "__main__":
