@@ -17,7 +17,7 @@
  * If /sys/class/gpio exists the original functions are used (set VMX_GPIO_SHIM_FORCE=1 to
  * use this implementation anyway). VMX_GPIO_SHIM_DEBUG=1 logs every call to stderr.
  *
- * Only built for Linux. Not verified on hardware: see README.md in this directory.
+ * Only built for Linux. Verified on a VMX-pi (Ubuntu 26.04, kernel 7.0): the HAL's DIO interrupts work through it.
  */
 
 #define _GNU_SOURCE
@@ -59,7 +59,6 @@ typedef struct {
 } backend_t;
 
 typedef struct {
-  bool active;
   int gpio;
   int fd;
   int wake_fd;
@@ -69,9 +68,12 @@ typedef struct {
   void *userdata;
   pthread_t thread;
   atomic_int stop; /* written by the thread that cancels, read by the ISR thread */
+  atomic_int self_owned; /* cancelled from its own callback: the ISR thread frees this slot when it ends */
 } isr_slot_t;
 
-static isr_slot_t g_slots[PI_MAX_GPIO + 1];
+/* One heap slot per running ISR thread, so a thread that outlives its cancellation never shares memory with a
+ * newer ISR on the same gpio. NULL = no ISR. */
+static isr_slot_t *g_slots[PI_MAX_GPIO + 1];
 static pthread_mutex_t g_config_mutex = PTHREAD_MUTEX_INITIALIZER;
 static bool g_debug;
 
@@ -236,28 +238,37 @@ static void *isr_thread(void *arg) {
       break;
     }
   }
+  if (atomic_load(&s->self_owned)) {
+    close(s->fd);
+    close(s->wake_fd);
+    free(s);
+  }
   return NULL;
 }
 
 /* Caller holds g_config_mutex. Stops the ISR on `gpio` if there is one. */
 static void stop_locked(int gpio) {
-  isr_slot_t *s = &g_slots[gpio];
-  if (!s->active) {
+  isr_slot_t *s = g_slots[gpio];
+  if (s == NULL) {
     return;
   }
+  g_slots[gpio] = NULL;
   atomic_store(&s->stop, 1);
   uint64_t one = 1;
   if (write(s->wake_fd, &one, sizeof one) < 0) {
     /* the thread also checks `stop` on every pass */
   }
   if (pthread_equal(pthread_self(), s->thread)) {
-    pthread_detach(s->thread); /* cancelled from its own callback: cannot join itself */
-  } else {
-    pthread_join(s->thread, NULL);
+    /* Cancelled from its own callback: it cannot join itself and is still running, so it must keep its slot.
+     * It closes the descriptors and frees the slot when the callback returns. */
+    atomic_store(&s->self_owned, 1);
+    pthread_detach(s->thread);
+    return;
   }
+  pthread_join(s->thread, NULL);
   close(s->fd);
   close(s->wake_fd);
-  memset(s, 0, sizeof *s);
+  free(s);
 }
 
 static int set_isr(unsigned gpio, unsigned edge, int timeout_ms, isr_func_t f, isr_func_ex_t fex,
@@ -291,9 +302,13 @@ static int set_isr(unsigned gpio, unsigned edge, int timeout_ms, isr_func_t f, i
     return PI_BAD_ISR_INIT;
   }
 
-  isr_slot_t *s = &g_slots[gpio];
-  memset(s, 0, sizeof *s);
-  s->active = true;
+  isr_slot_t *s = calloc(1, sizeof *s);
+  if (s == NULL) {
+    close(fd);
+    close(wake_fd);
+    pthread_mutex_unlock(&g_config_mutex);
+    return PI_BAD_ISR_INIT;
+  }
   s->gpio = (int)gpio;
   s->fd = fd;
   s->wake_fd = wake_fd;
@@ -304,10 +319,11 @@ static int set_isr(unsigned gpio, unsigned edge, int timeout_ms, isr_func_t f, i
   if (pthread_create(&s->thread, NULL, isr_thread, s) != 0) {
     close(fd);
     close(wake_fd);
-    memset(s, 0, sizeof *s);
+    free(s);
     pthread_mutex_unlock(&g_config_mutex);
     return PI_BAD_ISR_INIT;
   }
+  g_slots[gpio] = s;
   pthread_mutex_unlock(&g_config_mutex);
   return 0;
 }
