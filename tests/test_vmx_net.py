@@ -133,8 +133,13 @@ class HelperTest(unittest.TestCase):
     def test_the_default_access_point_keyfile(self):
         text = net.ap_keyfile("VMX-1234", 1234, "bg", 6, "password", "wlan0", connection_uuid="u")
         for line in ("id=robot-ap", "type=wifi", "interface-name=wlan0", "mode=ap", "ssid=VMX-1234", "band=bg", "channel=6",
-                     "key-mgmt=wpa-psk", "psk=password", "method=shared", "address1=10.12.34.2/24", "autoconnect=true"):
+                     "key-mgmt=wpa-psk", "psk=password", "method=shared", "address1=10.12.34.2/24", "autoconnect=true",
+                     "powersave=2"):
             self.assertIn(line, text.splitlines())
+
+    def test_wifi_power_saving_is_off_in_both_wifi_profiles(self):
+        self.assertIn("powersave=2", net.ap_keyfile("VMX-1234", 1234, "bg", 6, "password", "wlan0").splitlines())
+        self.assertIn("powersave=2", net.client_keyfile("Home", "secret", "wlan0").splitlines())
 
     def test_the_ethernet_keyfile_is_172_22_11_2_with_a_dhcp_server(self):
         text = net.ethernet_keyfile("eth0", connection_uuid="u")

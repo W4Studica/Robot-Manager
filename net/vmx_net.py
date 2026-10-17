@@ -104,7 +104,9 @@ def ap_keyfile(ssid, team, nm_band, channel, password, interface="wlan0", connec
     return keyfile([
         ("connection", [("id", AP_NAME), ("uuid", connection_uuid or str(uuid.uuid4())), ("type", "wifi"),
                         ("interface-name", interface), ("autoconnect", "true"), ("autoconnect-priority", "100")]),
-        ("wifi", [("mode", "ap"), ("ssid", ssid), ("band", nm_band), ("channel", str(channel))]),
+        # powersave=2 turns Wi-Fi power saving off: with it on, an access point answers in bursts (ping 6 ms to 400 ms),
+        # which makes ssh logins and deploys stall.
+        ("wifi", [("mode", "ap"), ("ssid", ssid), ("band", nm_band), ("channel", str(channel)), ("powersave", "2")]),
         ("wifi-security", [("key-mgmt", "wpa-psk"), ("psk", password)]),
         ("ipv4", [("method", "shared"), ("address1", team_to_address(team) + "/24")]),
         ("ipv6", [("method", "ignore")]),
@@ -124,7 +126,7 @@ def client_keyfile(ssid, password, interface="wlan0", connection_uuid=None):
     sections = [
         ("connection", [("id", CLIENT_NAME), ("uuid", connection_uuid or str(uuid.uuid4())), ("type", "wifi"),
                         ("interface-name", interface), ("autoconnect", "true")]),
-        ("wifi", [("mode", "infrastructure"), ("ssid", ssid)]),
+        ("wifi", [("mode", "infrastructure"), ("ssid", ssid), ("powersave", "2")]),
     ]
     if password:
         sections.append(("wifi-security", [("key-mgmt", "wpa-psk"), ("psk", password)]))
