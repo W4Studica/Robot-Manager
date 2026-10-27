@@ -530,7 +530,7 @@ install_plugin() {
   run "$BUILD_CXX" -std=c++20 -shared -fPIC -O2 \
     -I/usr/local/include/vmxpi -I"$drv" \
     -I"$studica/include" -I"$AW_DIR/hal/src/main/native/include" -I"$AW_DIR/wpiutil/src/main/native/include" \
-    "$studica/src/hardware/StudicaBackend.cpp" "$studica/src/conversion/DeviceConversions.cpp" "$studica/src/titan/Titan.cpp" \
+    "$studica"/src/hardware/*.cpp "$studica"/src/hardware/devices/*.cpp "$studica/src/conversion/DeviceConversions.cpp" "$studica/src/titan/Titan.cpp" \
     "$drv/analog_input.cpp" "$drv/dio.cpp" "$drv/encoder.cpp" "$drv/imu.cpp" "$drv/titan.cpp" \
     -L/usr/local/lib/vmxpi -lvmxpi_hal_cpp -lrt -lpthread -latomic \
     -o "$PLUGIN_DIR/libstudica_hardware.so"
