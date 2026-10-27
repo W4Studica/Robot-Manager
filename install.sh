@@ -529,9 +529,9 @@ install_plugin() {
   run install -d -m 0755 "$PLUGIN_DIR"
   run "$BUILD_CXX" -std=c++20 -shared -fPIC -O2 \
     -I/usr/local/include/vmxpi -I"$drv" \
-    -I"$studica/include" \
-    "$studica/src/StudicaBackend.cpp" \
-    "$drv/analog_input.cpp" "$drv/dio.cpp" "$drv/encoder.cpp" "$drv/imu.cpp" \
+    -I"$studica/include" -I"$AW_DIR/hal/src/main/native/include" -I"$AW_DIR/wpiutil/src/main/native/include" \
+    "$studica/src/StudicaBackend.cpp" "$studica/src/DeviceConversions.cpp" "$studica/src/Titan.cpp" \
+    "$drv/analog_input.cpp" "$drv/dio.cpp" "$drv/encoder.cpp" "$drv/imu.cpp" "$drv/titan.cpp" \
     -L/usr/local/lib/vmxpi -lvmxpi_hal_cpp -lrt -lpthread -latomic \
     -o "$PLUGIN_DIR/libstudica_hardware.so"
   if [ "$DRY_RUN" != 1 ]; then
