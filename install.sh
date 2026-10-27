@@ -352,7 +352,7 @@ validate_install_inputs() {
     [ -f "$RM_DIR/robot_manager.py" ] && [ -f "$RM_DIR/robot_manager.service" ] \
       || warn "dry run: Robot-Manager sources are not present at $RM_DIR"
     have_vmx || warn "dry run: VMX headers/libraries are not on this host; required on the robot for Studica builds"
-    [ -f "$AW_DIR/studica/src/StudicaBackend.cpp" ] \
+    [ -f "$AW_DIR/studica/src/hardware/StudicaBackend.cpp" ] \
       || warn "dry run: Studica source is not present under $AW_DIR"
     return 0
   fi
@@ -362,7 +362,7 @@ validate_install_inputs() {
   if [ "$SKIP_PLUGIN" != 1 ]; then
     have_vmx || die "VMX SDK missing: expected /usr/local/include/vmxpi/VMXPi.h and /usr/local/lib/vmxpi/libvmxpi_hal_cpp.so. Install the vmxpi-hal SDK (for example, the package built by vmxpi-aarch64-hal-builder), then rerun or pass --skip-plugin."
     local studica="$AW_DIR/studica"
-    [ -f "$studica/src/StudicaBackend.cpp" ] \
+    [ -f "$studica/src/hardware/StudicaBackend.cpp" ] \
       || die "halsim_studica plugin source not found under $AW_DIR (use --allwpilib-dir or pass --skip-plugin)"
     [ -d "$AW_DIR/studica/drivers" ] \
       || die "studica_drivers source not found under $AW_DIR (use --allwpilib-dir or pass --skip-plugin)"
@@ -530,7 +530,7 @@ install_plugin() {
   run "$BUILD_CXX" -std=c++20 -shared -fPIC -O2 \
     -I/usr/local/include/vmxpi -I"$drv" \
     -I"$studica/include" -I"$AW_DIR/hal/src/main/native/include" -I"$AW_DIR/wpiutil/src/main/native/include" \
-    "$studica/src/StudicaBackend.cpp" "$studica/src/DeviceConversions.cpp" "$studica/src/Titan.cpp" \
+    "$studica/src/hardware/StudicaBackend.cpp" "$studica/src/conversion/DeviceConversions.cpp" "$studica/src/titan/Titan.cpp" \
     "$drv/analog_input.cpp" "$drv/dio.cpp" "$drv/encoder.cpp" "$drv/imu.cpp" "$drv/titan.cpp" \
     -L/usr/local/lib/vmxpi -lvmxpi_hal_cpp -lrt -lpthread -latomic \
     -o "$PLUGIN_DIR/libstudica_hardware.so"
