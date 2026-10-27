@@ -141,7 +141,7 @@ static backend_t g_backend = {chardev_request, chardev_read_event};
  * Finds the original pigpio function `name`.
  *
  * dlsym(RTLD_NEXT) only searches the global scope after this library. That fails when the
- * HAL library was loaded with dlopen(RTLD_LOCAL), as halsim_vmx's Studica plugin does: the HAL
+ * HAL library was loaded with dlopen(RTLD_LOCAL), as halsim_studica's Studica plugin does: the HAL
  * (and its pigpio) then lives in the plugin's local scope and RTLD_NEXT returns NULL. Then
  * gpioTerminate() was never forwarded, pigpio's threads kept running and the process hung in exit().
  * So fall back to asking for the already loaded HAL library by name (RTLD_NOLOAD never loads anything).

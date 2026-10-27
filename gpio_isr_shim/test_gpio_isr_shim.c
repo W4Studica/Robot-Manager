@@ -261,7 +261,7 @@ static void test_cancel_from_inside_the_callback(void) {
   shim_test_stop_all();
 }
 
-/* The HAL is loaded with dlopen(RTLD_LOCAL), like halsim_vmx's Studica plugin does. dlsym(RTLD_NEXT)
+/* The HAL is loaded with dlopen(RTLD_LOCAL), like halsim_studica's Studica plugin does. dlsym(RTLD_NEXT)
  * cannot see it; the shim must still forward gpioTerminate() and gpioTick() to it. */
 static void test_forwards_to_a_locally_loaded_hal(void) {
   begin();

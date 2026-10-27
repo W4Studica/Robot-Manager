@@ -15,12 +15,12 @@ class RuntimeInventoryTest(unittest.TestCase):
             root = Path(directory)
             runtime = root / "runtime"
             runtime.mkdir()
-            library = runtime / "libhalsim_vmx.so"
+            library = runtime / "libhalsim_studica.so"
             library.write_bytes(b"first binary")
             first = inventory.collect(root, runtime, "test-image", None, "test-release")
             self.assertIsNone(first["image"]["sha256"])
             self.assertTrue(any("libwpiHal.so" in item and "libwpiHald.so" in item for item in first["missingRequired"]))
-            self.assertFalse(any("libhalsim_vmx.so" in item for item in first["missingRequired"]))
+            self.assertFalse(any("libhalsim_studica.so" in item for item in first["missingRequired"]))
             library.write_bytes(b"second binary")
             second = inventory.collect(root, runtime, "test-image", None, "test-release")
             self.assertNotEqual(first["files"][str(library)]["sha256"],
@@ -35,7 +35,7 @@ class RuntimeInventoryTest(unittest.TestCase):
             (root / "usr/local/lib/vmxpi/libvmxpi_hal_cpp.so").write_bytes(b"hal")
             runtime = root / "runtime"
             runtime.mkdir()
-            for name in ("libhalsim_vmxd.so", "libhalsim_vmx_studica.so", "libwpiHald.so"):
+            for name in ("libhalsim_studicad.so", "libstudica_hardware.so", "libstudica.so", "libwpiHald.so"):
                 (runtime / name).write_bytes(b"x")
             record = inventory.collect(root, runtime, "image", None, "release")
             self.assertEqual(record["missingRequired"], [])

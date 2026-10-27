@@ -34,7 +34,7 @@ python3 system/runtime_inventory.py \
 
 This reads OS versions, SDK headers and native libraries without opening VMX or
 reading network profiles or passwords. It exits nonzero if required files are
-missing (the VMX headers and HAL, the Studica plugin, one `libhalsim_vmx[d].so` and one `libwpiHal[d].so`; the build type
+missing (the VMX headers and HAL, the Studica plugin, one `libhalsim_studica[d].so` and one `libwpiHal[d].so`; the build type
 decides which of each pair is deployed, and `libstudica_drivers.so` is optional). If the image digest is unknown, omit `--image-sha256`; JSON records `null`
 rather than inventing a digest. The original ISO can be hashed on the **PC** with
 `sha256sum /path/to/image.iso`. Do not upload the image, HAL or SDK with the record.

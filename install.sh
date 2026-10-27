@@ -4,8 +4,7 @@
 #     ./install.sh [options]        (run as the login user; sudo is requested when needed)
 #
 # It lives in the W4Studica/Robot-Manager repo. Clone that repo and the W4Studica/allwpilib
-# repo side by side on the robot (only allwpilib's studica_drivers/ and
-# simulation/halsim_vmx/src/ are used):
+# repo side by side on the robot (the drivers, public headers and backend are in allwpilib/studica/):
 #     ~/Robot-Manager/install.sh
 #     ~/allwpilib/
 # or point at them with --robot-manager-dir / --allwpilib-dir.
@@ -19,7 +18,7 @@
 #   2. RioLog discovery   Avahi publishes robot.local, the hostname used by WPILib's RioLog client
 #   3. VMX HAL SDK         installs vmxpi-hal .deb from the sibling builder's dist/ when headers/libs are missing
 #   4. studica_drivers    built with Studica's Makefile, copied into /usr/local (needs g++, make, VMXPi.h)
-#   5. Studica plugin     /opt/halsim_vmx/libhalsim_vmx_studica.so for halsim_vmx (needs g++ >= 11, VMXPi.h)
+#   5. Studica plugin     /opt/halsim_studica/libstudica_hardware.so for halsim_studica (needs g++ >= 11, VMXPi.h)
 #   6. GPIO interrupt shim /opt/robot_manager/lib/libvmx_gpio_isr_shim.so (needs gcc and make). Fixes
 #                         "RPI GPIO Interrupt Enable: PI_BAD_ISR_INIT" on kernels without GPIO sysfs
 #   7. LSE atomics emulation /opt/robot_manager/lib/libvmx_lse_emu.so (needs gcc and make). Lets WPILib's libMrcLib
@@ -40,7 +39,7 @@ SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 OPT_DIR=/opt/robot_manager
 CONF_DIR=/etc/robot_manager
-PLUGIN_DIR=/opt/halsim_vmx
+PLUGIN_DIR=/opt/halsim_studica
 BUILD_DIR=/opt/robot_manager/build
 SERVICE=robot_manager
 
@@ -353,8 +352,8 @@ validate_install_inputs() {
     [ -f "$RM_DIR/robot_manager.py" ] && [ -f "$RM_DIR/robot_manager.service" ] \
       || warn "dry run: Robot-Manager sources are not present at $RM_DIR"
     have_vmx || warn "dry run: VMX headers/libraries are not on this host; required on the robot for Studica builds"
-    [ -f "$AW_DIR/simulation/halsim_vmx/src/studica/native/cpp/StudicaBackend.cpp" ] \
-      || warn "dry run: halsim_vmx source is not present under $AW_DIR"
+    [ -f "$AW_DIR/studica/src/StudicaBackend.cpp" ] \
+      || warn "dry run: Studica source is not present under $AW_DIR"
     return 0
   fi
   [ -f "$RM_DIR/robot_manager.py" ] && [ -f "$RM_DIR/robot_manager.service" ] \
@@ -362,16 +361,16 @@ validate_install_inputs() {
 
   if [ "$SKIP_PLUGIN" != 1 ]; then
     have_vmx || die "VMX SDK missing: expected /usr/local/include/vmxpi/VMXPi.h and /usr/local/lib/vmxpi/libvmxpi_hal_cpp.so. Install the vmxpi-hal SDK (for example, the package built by vmxpi-aarch64-hal-builder), then rerun or pass --skip-plugin."
-    local hv="$AW_DIR/simulation/halsim_vmx/src"
-    [ -f "$hv/studica/native/cpp/StudicaBackend.cpp" ] \
-      || die "halsim_vmx plugin source not found under $AW_DIR (use --allwpilib-dir or pass --skip-plugin)"
-    [ -d "$AW_DIR/studica_drivers" ] \
+    local studica="$AW_DIR/studica"
+    [ -f "$studica/src/StudicaBackend.cpp" ] \
+      || die "halsim_studica plugin source not found under $AW_DIR (use --allwpilib-dir or pass --skip-plugin)"
+    [ -d "$AW_DIR/studica/drivers" ] \
       || die "studica_drivers source not found under $AW_DIR (use --allwpilib-dir or pass --skip-plugin)"
   fi
 
   if [ "$SKIP_DRIVERS" != 1 ] && { [ "$UPGRADE_DRIVERS" = 1 ] || [ ! -f /usr/local/lib/studica_drivers/libstudica_drivers.so ]; }; then
     have_vmx || die "VMX SDK missing: expected /usr/local/include/vmxpi/VMXPi.h and /usr/local/lib/vmxpi/libvmxpi_hal_cpp.so. Install the vmxpi-hal SDK (for example, the package built by vmxpi-aarch64-hal-builder), or pass --skip-drivers."
-    [ -d "$AW_DIR/studica_drivers" ] \
+    [ -d "$AW_DIR/studica/drivers" ] \
       || die "studica_drivers source not found under $AW_DIR (use --allwpilib-dir or pass --skip-drivers)"
   fi
   if [ "$SKIP_SHIM" != 1 ]; then
@@ -420,8 +419,8 @@ check_deployed_wpilib_runtime() {
     for library in "${libraries[@]}"; do
       # The debug HAL extension needs libwpiHald/libwpiutild, which only a debug deploy has. A release deploy ships both
       # extensions but not those libraries, and the program never loads the debug one then.
-      if [ "$(basename "$library")" = libhalsim_vmxd.so ] && [ ! -f "$lib_dir/libwpiHald.so" ]; then
-        echo "  skipping libhalsim_vmxd.so: this is a release deploy (no libwpiHald.so)"
+      if [ "$(basename "$library")" = libhalsim_studicad.so ] && [ ! -f "$lib_dir/libwpiHald.so" ]; then
+        echo "  skipping libhalsim_studicad.so: this is a release deploy (no libwpiHald.so)"
         continue
       fi
       verify_shared_library "$library" "$search_path"
@@ -491,7 +490,7 @@ install_drivers() {
   if [ "$SKIP_DRIVERS" = 1 ]; then echo "  skipped (--skip-drivers)"; return; fi
   have_vmx || { [ "$DRY_RUN" = 1 ] && { warn "dry run: VMX SDK is absent on this host; skipping the local driver build preview"; return; }; die "VMX SDK not found under /usr/local; cannot build studica_drivers"; }
   # The vmx-hal package already ships (an older) libstudica_drivers. Do not overwrite files a package owns
-  # unless asked. The halsim_vmx plugin compiles the driver sources itself, so it does not need this library.
+  # unless asked. The halsim_studica plugin compiles the driver sources itself, so it does not need this library.
   if [ -f /usr/local/lib/studica_drivers/libstudica_drivers.so ] && [ "$UPGRADE_DRIVERS" != 1 ]; then
     echo "  already installed (probably by the vmx-hal package); not replacing it."
     echo "  pass --upgrade-drivers to install this repo's newer copy over it (replaces package-owned files)."
@@ -500,7 +499,7 @@ install_drivers() {
   # Build in a copy so the checkout is not littered with build output (or root-owned files).
   run rm -rf "$BUILD_DIR/studica_drivers"
   run install -d "$BUILD_DIR"
-  run cp -r "$AW_DIR/studica_drivers" "$BUILD_DIR/studica_drivers"
+  run cp -r "$AW_DIR/studica/drivers" "$BUILD_DIR/studica_drivers"
   run make -C "$BUILD_DIR/studica_drivers" CC="$BUILD_CC" CXX="$BUILD_CXX"
   if [ "$DRY_RUN" != 1 ] && ! compgen -G "$BUILD_DIR/studica_drivers/*.hpp" >/dev/null; then
     die "studica_drivers build produced no public headers"
@@ -515,7 +514,7 @@ install_drivers() {
 }
 
 install_plugin() {
-  info "Studica backend plugin for halsim_vmx"
+  info "Studica backend plugin for halsim_studica"
   if [ "$SKIP_PLUGIN" = 1 ]; then echo "  skipped (--skip-plugin)"; return; fi
   have_vmx || { [ "$DRY_RUN" = 1 ] && { warn "dry run: VMX SDK is absent on this host; skipping the local plugin build preview"; return; }; die "VMX SDK not found under /usr/local; cannot build the Studica backend plugin"; }
   local major; major="$(gpp_major)"
@@ -525,19 +524,19 @@ install_plugin() {
     info "Would build the plugin with $BUILD_CXX (GCC/G++ 11 or newer is required)"
   fi
 
-  local drv="$AW_DIR/studica_drivers"
-  local hv="$AW_DIR/simulation/halsim_vmx/src"
+  local drv="$AW_DIR/studica/drivers"
+  local studica="$AW_DIR/studica"
   run install -d -m 0755 "$PLUGIN_DIR"
   run "$BUILD_CXX" -std=c++20 -shared -fPIC -O2 \
     -I/usr/local/include/vmxpi -I"$drv" \
-    -I"$hv/main/native/include" -I"$hv/studica/native/include" \
-    "$hv/studica/native/cpp/StudicaBackend.cpp" \
+    -I"$studica/include" \
+    "$studica/src/StudicaBackend.cpp" \
     "$drv/analog_input.cpp" "$drv/dio.cpp" "$drv/encoder.cpp" "$drv/imu.cpp" \
     -L/usr/local/lib/vmxpi -lvmxpi_hal_cpp -lrt -lpthread -latomic \
-    -o "$PLUGIN_DIR/libhalsim_vmx_studica.so"
+    -o "$PLUGIN_DIR/libstudica_hardware.so"
   if [ "$DRY_RUN" != 1 ]; then
     run ldconfig
-    verify_shared_library "$PLUGIN_DIR/libhalsim_vmx_studica.so"
+    verify_shared_library "$PLUGIN_DIR/libstudica_hardware.so"
   fi
 }
 
@@ -765,7 +764,7 @@ summary() {
 ==> Done$( [ "$DRY_RUN" = 1 ] && echo " (dry run: nothing was changed)" )
   service:   systemctl status $SERVICE      logs: journalctl -u $SERVICE -f
   config:    $CONF_DIR/config.json   (robot_home = $ROBOT_HOME)
-  plugin:    $PLUGIN_DIR/libhalsim_vmx_studica.so   -> HALSIMVMX_BACKEND
+  plugin:    $PLUGIN_DIR/libstudica_hardware.so   -> HALSIMSTUDICA_BACKEND
   shim:      $OPT_DIR/lib/libvmx_gpio_isr_shim.so   -> LD_PRELOAD (only on kernels without /sys/class/gpio)
   lse emu:   $OPT_DIR/lib/libvmx_lse_emu.so   -> LD_AUDIT, set by robot_manager on CPUs without LSE atomics
   build:     $BUILD_CC / $BUILD_CXX and make (missing packages installed by apt; --no-install-deps disables this)
@@ -773,7 +772,6 @@ summary() {
   network:   setupHotspot WorldSkills 1234 2.4 password; toggleNetMode ap; saved Wi-Fi profiles are deleted
   runtime:   ./install.sh --check-runtime-deps --user $LOGIN_USER (after GradleRIO deploy)
 WPILib/OpenCV shared libraries are deployed per project by GradleRIO; this installer checks them but does not select a global OpenCV version.
-Next: allwpilib/simulation/halsim_vmx/HARDWARE_CHECKLIST.md.
 EOF
 }
 

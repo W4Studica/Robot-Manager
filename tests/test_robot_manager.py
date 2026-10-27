@@ -103,8 +103,8 @@ class ManagerTest(unittest.TestCase):
         self.finish(manager, thread)
 
     def test_environment_reaches_the_program(self):
-        write_script(self.command, f'echo "$HALSIMVMX_IMU" > "{self.out}"; sleep 30\n')
-        env = dict(os.environ, HALSIMVMX_IMU="1")
+        write_script(self.command, f'echo "$HALSIMSTUDICA_IMU" > "{self.out}"; sleep 30\n')
+        env = dict(os.environ, HALSIMSTUDICA_IMU="1")
         manager = rm.Manager(self.command, self.home, env, backoff_initial=0.05, stop_grace=2.0)
         thread = threading.Thread(target=manager.run, daemon=True)
         thread.start()

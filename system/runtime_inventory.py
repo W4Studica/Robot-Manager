@@ -31,14 +31,15 @@ def version(args):
 def collect(sdk, runtime, image_id, image_sha256, release):
     headers = sdk / "usr/local/include/vmxpi"
     hal = sdk / "usr/local/lib/vmxpi/libvmxpi_hal_cpp.so"
-    # A release deploy has one build type: libhalsim_vmx.so with libwpiHal.so, or libhalsim_vmxd.so with libwpiHald.so.
+    # A release deploy has one build type: libhalsim_studica.so with libwpiHal.so, or libhalsim_studicad.so with libwpiHald.so.
     # libstudica_drivers.so exists only when the Studica drivers are deployed as a separate library (the release layout);
     # the example project links them into the plugin. So each entry is "any of these", and the drivers are not required.
     required_groups = [
         [headers / "VMXPi.h"],
         [hal],
-        [runtime / "libhalsim_vmx_studica.so"],
-        [runtime / "libhalsim_vmx.so", runtime / "libhalsim_vmxd.so"],
+        [runtime / "libstudica_hardware.so"],
+        [runtime / "libstudica.so"],
+        [runtime / "libhalsim_studica.so", runtime / "libhalsim_studicad.so"],
         [runtime / "libwpiHal.so", runtime / "libwpiHald.so"],
     ]
     paths = set(headers.rglob("*.h")) | {hal} | set(runtime.glob("*.so*"))
