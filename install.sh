@@ -943,7 +943,7 @@ summary() {
   config:    $CONF_DIR/config.json   (robot_home = $ROBOT_HOME)
   RT kernel: $RT_KERNEL_STATUS
   RT policy: $CONF_DIR/config.json realtime (new/legacy default: auto, SCHED_RR, priority 10; existing policies preserved)
-  plugin:    $PLUGIN_DIR/libstudica_hardware.so   -> HALSIMSTUDICA_BACKEND
+  plugin:    $PLUGIN_DIR/libstudica_hardware.so   (hardware plugin; no environment override)
   shim:      $OPT_DIR/lib/libvmx_gpio_isr_shim.so   -> LD_PRELOAD (only on kernels without /sys/class/gpio)
   lse emu:   $OPT_DIR/lib/libvmx_lse_emu.so   -> LD_AUDIT, set by robot_manager on CPUs without LSE atomics
   build:     $BUILD_CC / $BUILD_CXX and make (missing packages installed by apt; --no-install-deps disables this)
