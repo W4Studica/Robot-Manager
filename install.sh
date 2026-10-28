@@ -42,6 +42,7 @@ CONF_DIR=/etc/robot_manager
 PLUGIN_DIR=/opt/halsim_studica
 BUILD_DIR=/opt/robot_manager/build
 SERVICE=robot_manager
+MANAGER_BINARY=""
 
 DRY_RUN=0
 DETACH_INSTALL=0
@@ -64,7 +65,7 @@ VMX_HAL_DEB="${VMX_HAL_DEB:-}"
 ROBOT_HOME=""
 LOGIN_USER=""
 # Defaults: this repo is where install.sh is; allwpilib is a sibling checkout (or inside this directory).
-if [ -f "$SELF_DIR/robot_manager.py" ]; then RM_DIR="$SELF_DIR"; else RM_DIR="$SELF_DIR/robot_manager"; fi
+if [ -f "$SELF_DIR/Cargo.toml" ]; then RM_DIR="$SELF_DIR"; else RM_DIR="$SELF_DIR/robot_manager"; fi
 if [ -d "$SELF_DIR/../allwpilib" ]; then AW_DIR="$SELF_DIR/../allwpilib"; else AW_DIR="$SELF_DIR/allwpilib"; fi
 
 usage() {
@@ -75,6 +76,7 @@ Options:
   --user NAME              login user that deploys to this robot (default: invoking user or SUDO_USER)
   --robot-home DIR         robot_home for robot_manager (default: /home/<user>)
   --robot-manager-dir DIR  Robot-Manager checkout (default: the directory of install.sh)
+  --manager-binary FILE    use a prebuilt native robot_manager instead of building with Cargo
   --allwpilib-dir DIR      allwpilib checkout (default: ../allwpilib next to this repo)
   --vmx-hal-deb FILE       install this vmxpi-hal arm64 package if VMX SDK headers/libraries are missing
   --sudoers                allow the login user passwordless sudo for: systemctl (robot_manager), ldconfig, sync
@@ -105,6 +107,7 @@ while [ $# -gt 0 ]; do
     --user) [ $# -ge 2 ] || die "--user needs a value"; LOGIN_USER="$2"; shift ;;
     --robot-home) [ $# -ge 2 ] || die "--robot-home needs a value"; ROBOT_HOME="$2"; shift ;;
     --robot-manager-dir) [ $# -ge 2 ] || die "--robot-manager-dir needs a value"; RM_DIR="$2"; shift ;;
+    --manager-binary) [ $# -ge 2 ] || die "--manager-binary needs a value"; MANAGER_BINARY="$2"; shift ;;
     --allwpilib-dir) [ $# -ge 2 ] || die "--allwpilib-dir needs a value"; AW_DIR="$2"; shift ;;
     --vmx-hal-deb) [ $# -ge 2 ] || die "--vmx-hal-deb needs a value"; VMX_HAL_DEB="$(realpath -m -- "$2")"; shift ;;
     --sudoers) WITH_SUDOERS=1 ;;
@@ -169,7 +172,7 @@ ensure_base_runtime_dependencies() {
     apt_install_packages "robot_manager and native-library runtime tools" "${packages[@]}"
   fi
   if [ "$DRY_RUN" != 1 ]; then
-    command -v python3 >/dev/null 2>&1 || die "python3 is required (robot_manager is a Python script)"
+    command -v python3 >/dev/null 2>&1 || die "python3 is required for network and installation helpers"
     if ! command -v ldd >/dev/null 2>&1 || ! command -v ldconfig >/dev/null 2>&1; then
       die "ldd and ldconfig are required to validate native runtime dependencies"
     fi
@@ -325,6 +328,7 @@ preflight() {
   echo "  glibc:   $(ldd --version 2>/dev/null | head -1 || echo unknown)"
   echo "  g++:     $(tool_version g++ --version)"
   echo "  python3: $(tool_version python3 --version)"
+  echo "  cargo:   $(tool_version cargo --version)"
   if ! command -v systemctl >/dev/null 2>&1; then
     if [ "$DRY_RUN" = 1 ]; then
       warn "systemctl is missing on this host; the dry run cannot validate service operations"
@@ -349,15 +353,15 @@ gpp_major() { compiler_major "${BUILD_CXX:-g++}"; }
 
 validate_install_inputs() {
   if [ "$DRY_RUN" = 1 ]; then
-    [ -f "$RM_DIR/robot_manager.py" ] && [ -f "$RM_DIR/robot_manager.service" ] \
+    [ -f "$RM_DIR/Cargo.toml" ] && [ -f "$RM_DIR/Cargo.lock" ] && [ -f "$RM_DIR/robot_manager.service" ] \
       || warn "dry run: Robot-Manager sources are not present at $RM_DIR"
     have_vmx || warn "dry run: VMX headers/libraries are not on this host; required on the robot for Studica builds"
     [ -f "$AW_DIR/studica/src/hardware/StudicaBackend.cpp" ] \
       || warn "dry run: Studica source is not present under $AW_DIR"
     return 0
   fi
-  [ -f "$RM_DIR/robot_manager.py" ] && [ -f "$RM_DIR/robot_manager.service" ] \
-    || die "robot_manager.py / robot_manager.service not found in $RM_DIR (use --robot-manager-dir)"
+  [ -f "$RM_DIR/Cargo.toml" ] && [ -f "$RM_DIR/Cargo.lock" ] && [ -f "$RM_DIR/robot_manager.service" ] \
+    || die "Cargo.toml / Cargo.lock / robot_manager.service not found in $RM_DIR (use --robot-manager-dir)"
 
   if [ "$SKIP_PLUGIN" != 1 ]; then
     have_vmx || die "VMX SDK missing: expected /usr/local/include/vmxpi/VMXPi.h and /usr/local/lib/vmxpi/libvmxpi_hal_cpp.so. Install the vmxpi-hal SDK (for example, the package built by vmxpi-aarch64-hal-builder), then rerun or pass --skip-plugin."
@@ -462,10 +466,44 @@ PY
   echo "  checked $count deployed executable/shared librar$( [ "$count" -eq 1 ] && echo "y" || echo "ies" ); no unresolved dependencies"
 }
 
+rust_compiler_supported() {
+  local version
+  version="$(rustc --version 2>/dev/null)" || return 1
+  python3 - "$version" <<'PYRUST'
+import re, sys
+match = re.search(r"rustc (\d+)\.(\d+)", sys.argv[1])
+raise SystemExit(0 if match and tuple(map(int, match.groups())) >= (1, 85) else 1)
+PYRUST
+}
+
+ensure_rust_build_dependencies() {
+  if [ -n "$MANAGER_BINARY" ]; then
+    [ -f "$MANAGER_BINARY" ] || die "--manager-binary file not found: $MANAGER_BINARY"
+    return
+  fi
+  if ! command -v cargo >/dev/null 2>&1 || ! rust_compiler_supported; then
+    apt_install_packages "Rust build tools for robot_manager" cargo rustc
+  fi
+  if [ "$DRY_RUN" != 1 ]; then
+    command -v cargo >/dev/null 2>&1 && rust_compiler_supported \
+      || die "cargo and rustc (Rust >= 1.85) are required; install them or use --manager-binary"
+  fi
+}
+
 install_robot_manager() {
-  info "robot_manager"
+  info "robot_manager (Rust)"
+  local binary="$MANAGER_BINARY"
+  if [ -z "$binary" ]; then
+    run cargo build --release --locked --manifest-path "$RM_DIR/Cargo.toml" --target-dir "$BUILD_DIR/robot_manager"
+    binary="$BUILD_DIR/robot_manager/release/robot_manager"
+  fi
+  if [ "$DRY_RUN" != 1 ]; then
+    "$binary" --version || die "robot_manager binary cannot run on this robot"
+  fi
   run install -d -m 0755 "$OPT_DIR" "$CONF_DIR"
-  run install -m 0755 "$RM_DIR/robot_manager.py" "$OPT_DIR/robot_manager.py"
+  # Replace atomically: an already running Rust service may still hold the old executable open.
+  run install -m 0755 "$binary" "$OPT_DIR/robot_manager.new"
+  run mv -f "$OPT_DIR/robot_manager.new" "$OPT_DIR/robot_manager"
   run install -m 0644 "$RM_DIR/robot_manager.service" "/etc/systemd/system/$SERVICE.service"
 
   if [ -f "$CONF_DIR/config.json" ]; then
@@ -481,6 +519,8 @@ install_robot_manager() {
 EOF
   fi
 
+  run "$OPT_DIR/robot_manager" --config "$CONF_DIR/config.json" --check-config
+  run rm -f "$OPT_DIR/robot_manager.py"
   run systemctl daemon-reload
   run systemctl enable "$SERVICE"
 }
@@ -824,6 +864,7 @@ ensure_base_runtime_dependencies
 ensure_vmx_hal_sdk
 validate_install_inputs
 ensure_build_dependencies
+ensure_rust_build_dependencies
 install_robot_manager
 install_drivers
 install_plugin

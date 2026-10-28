@@ -1,6 +1,6 @@
 # robot_manager
 
-What the W4Studica software puts on a Studica VMX-pi: a service that runs the robot program, the helpers that make WPILib 2027 run on the VMX's Raspberry Pi 4, the network setup, and the installer. `robot_manager.py` is a single Python 3 script (standard library only) and replaces the roboRIO `robot` service.
+What the W4Studica software puts on a Studica VMX-pi: a service that runs the robot program, the helpers that make WPILib 2027 run on the VMX's Raspberry Pi 4, the network setup, and the installer. `robot_manager` is a Rust executable that replaces the roboRIO `robot` service. The daemon has no Python runtime dependency; the network and installation helpers still use Python 3.
 
 ## What it does
 
@@ -11,6 +11,7 @@ What the W4Studica software puts on a Studica VMX-pi: a service that runs the ro
 - **RioLog**: the program's stdout and stderr go to the systemd journal and to TCP port 1741 in WPILib NetConsole framing, so VS Code's RioLog works. `install.sh` enables Avahi and publishes `robot.local`; without mDNS the client needs a route to the team address `10.TE.AM.2`. Each client has its own bounded queue (256 frames) and is dropped if it falls behind; at most 8 clients. A failing journal or RioLog never stops the robot output from being read. Settings: `riolog_enabled`, `riolog_port`, `riolog_history`.
 - Adds environment variables from the platform profile whose `kernel_regex` matches the kernel. The OS image is fixed, so no profile is used.
 - Does not open the VMX and does not run MockDS; both belong to the robot program.
+- Uses a separate session/process group for each robot run and acts as a Linux child subreaper, so orphaned descendants in that group are waited on before restart. Robot stdout and stderr share one pipe. Journal and RioLog queues are bounded, so a stalled console cannot block robot output; journal chunks may be dropped if its queue fills.
 
 ## Helpers for the Pi 4
 
@@ -59,7 +60,7 @@ Copy `config.example.json` and edit it.
 - `robot_command`: defaults to `<robot_home>/robotCommand`.
 - `stop_grace_seconds`: total seconds for the stop signals (default 5, divided evenly).
 - `stop_signals`: ordered list from `SIGINT`, `SIGTERM`, `SIGHUP`, `SIGQUIT`, `SIGUSR1`, `SIGUSR2` (default `["SIGINT", "SIGTERM"]`).
-- Environment precedence: service environment, then `env`, then the LSE `LD_AUDIT` (only if `env` does not set it), then the first matching profile.
+- Environment precedence: service environment, then `env`, then the LSE `LD_AUDIT` (only if `env` does not set it), then the first matching profile. Kernel patterns use Rust `regex` syntax; Python look-around and backreferences are not supported and fail configuration validation.
 
 ## Installation
 
@@ -75,6 +76,8 @@ cd Robot-Manager
 
 It installs `robot_manager` and its service, `studica_drivers`, the Studica backend plugin (`/opt/halsim_studica/`, needs g++ 11 or newer; GCC 11 is installed if the default is older), the GPIO shim, the LSE emulation, the CPU service, the network commands and setup, and (with `--sudoers`) passwordless `sudo` for the deploy login, limited to `systemctl stop|start|enable robot_manager`, `ldconfig` and `sync`. Missing apt packages are installed (`--no-install-deps` lists them and exits). The service is restarted last.
 
+The installer builds the daemon with `cargo build --release --locked` (Rust 1.85 or newer). Missing Cargo/Rust packages are installed through apt. The first build needs access to crates.io. To use a prebuilt executable for the robot, pass `--manager-binary /path/to/robot_manager`; Cargo is then unnecessary on the robot. Existing JSON configuration is retained and validated before the service is enabled.
+
 The VMX SDK (`VMXPi.h`, `libvmxpi_hal_cpp.so`) is not part of Ubuntu or WPILib. It comes with the robot image, or from `../vmxpi-aarch64-hal-builder/dist/vmxpi-hal_*_arm64.deb` (or `--vmx-hal-deb FILE`). Use `--skip-drivers`, `--skip-plugin`, `--skip-shim`, `--skip-lse-emu` or `--skip-cpu-max` to leave parts out; see `./install.sh --help`.
 
 WPILib, CameraServer and OpenCV libraries are deployed per project by GradleRIO to `/home/<user>/wpilib/third-party/lib`, not installed globally. `./install.sh --check-runtime-deps --user <user>` runs `ldd` on the deployed program and libraries and reports unresolved system libraries (the debug extension `libhalsim_studicad.so` is skipped in a release deploy). During a full install this check only warns.
@@ -83,7 +86,8 @@ Manual install:
 
 ```bash
 sudo mkdir -p /opt/robot_manager /etc/robot_manager
-sudo cp robot_manager.py /opt/robot_manager/
+cargo build --release --locked
+sudo install -m 0755 target/release/robot_manager /opt/robot_manager/robot_manager
 sudo cp config.example.json /etc/robot_manager/config.json   # edit robot_home
 sudo cp robot_manager.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now robot_manager
@@ -97,7 +101,22 @@ GradleRIO's `VmxPi` target deploys with `sudo systemctl stop/start/enable robot_
 ## Tests
 
 ```bash
-python3 -m unittest discover -s tests
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test --locked
+python3 -m unittest discover -s tests     # network, CPU, inventory and installer helpers
 ```
+
+The daemon is split into `src/config.rs`, `src/process.rs`, `src/manager.rs`, `src/output.rs` and `src/riolog.rs`. `src/main.rs` handles the CLI and signal registration. `--check-config` validates a file without opening a console or starting a robot program.
+
+Cross build with a matching Rust target and an aarch64 GNU linker:
+
+```bash
+rustup target add aarch64-unknown-linux-gnu
+CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
+  cargo build --release --locked --target aarch64-unknown-linux-gnu
+```
+
+Cross compilation checks the executable and linking; VMX hardware and systemd operation still need testing on the robot.
 
 They cover profiles and precedence, running a command without a shebang, environment passing, restarts, waiting for a missing file, process-tree stop and `SIGKILL` escalation, RioLog framing and clients, the network commands with a mocked NetworkManager, network backup and restore, the CPU script, the runtime inventory and the apt handling.

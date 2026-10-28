@@ -6,7 +6,7 @@ After=network.target
 Type=simple
 # root: the VMX HAL (pigpio) needs /dev/mem
 User=root
-ExecStart=/usr/bin/python3 /opt/robot_manager/robot_manager.py --config /etc/robot_manager/config.json
+ExecStart=/opt/robot_manager/robot_manager --config /etc/robot_manager/config.json
 Restart=always
 RestartSec=2
 # stop the whole robot process tree, not only the main process

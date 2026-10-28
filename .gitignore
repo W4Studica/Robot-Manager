@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 *.so
 test_gpio_isr_shim
+
+/target/
