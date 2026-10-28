@@ -130,7 +130,7 @@ class StorageProfileTests(unittest.TestCase):
             self.assertIn("zram-size = 8192", (root / "etc/systemd/zram-generator.conf.d/99-w4studica.conf").read_text())
             self.assertIn("Storage=volatile", (root / "etc/systemd/journald.conf.d/99-w4studica.conf").read_text())
             self.assertIn("--timeout=15", (root / "etc/systemd/system/NetworkManager-wait-online.service.d/99-w4studica.conf").read_text())
-            self.assertIn("RESUME=none", (root / "etc/initramfs-tools/conf.d/resume").read_text())
+            self.assertFalse((root / "etc/initramfs-tools").exists())
 
     def test_no_journal_and_disabled_zram_fail_before_replacing_fstab(self):
         for no_journal in [True, False]:
@@ -159,6 +159,32 @@ class StorageProfileTests(unittest.TestCase):
                     storage.configure(root, self.query)
             self.assertEqual((root / "etc/fstab").read_bytes(), before)
             self.assertFalse((root / "etc/systemd/zram-generator.conf.d/99-w4studica.conf").exists())
+
+    def test_storage_settings_preserve_existing_initramfs_resume_configuration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root)
+            resume = root / "etc/initramfs-tools/conf.d/resume"
+            resume.parent.mkdir(parents=True)
+            resume.write_text("RESUME=none\n# existing OS policy\n")
+            with patch.object(storage, "prepare_swap"):
+                storage.configure(root, self.query)
+            self.assertEqual(resume.read_text(), "RESUME=none\n# existing OS policy\n")
+
+    def test_mounted_nondefault_journal_mode_is_not_changed_at_next_remount(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root)
+            before = (root / "etc/fstab").read_bytes()
+
+            def query(*args):
+                if args[0] == "findmnt" and args[3] == "OPTIONS":
+                    return "rw,relatime,data=journal"
+                return self.query(*args)
+
+            with self.assertRaisesRegex(RuntimeError, "cannot be changed by remount"):
+                storage.configure(root, query)
+            self.assertEqual((root / "etc/fstab").read_bytes(), before)
 
     def test_conflicting_initramfs_root_flags_cannot_break_the_next_remount(self):
         for flag in ["data=writeback", "data=journal", "noload"]:
@@ -211,7 +237,8 @@ install_system_profile
             result = subprocess.run(["bash", str(harness)], capture_output=True, text=True, env=os.environ, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("[dry-run] python3", result.stdout)
-            self.assertIn("update-initramfs -u -k all", result.stdout)
+            self.assertNotIn("update-initramfs", result.stdout)
+            self.assertNotIn("[dry-run] dracut", result.stdout)
             self.assertIn("systemctl mask zramswap.service", result.stdout)
             for forbidden in ["[dry-run] swapoff", "[dry-run] swapon", "[dry-run] reboot", "[dry-run] mount", "--now"]:
                 self.assertNotIn(forbidden, result.stdout)

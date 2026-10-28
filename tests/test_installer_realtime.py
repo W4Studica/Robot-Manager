@@ -43,7 +43,7 @@ echo "STATUS=$RT_KERNEL_STATUS"
         result = self.kernel(dry_run=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("apt-get -o DPkg::Lock::Timeout=600 update", result.stdout)
-        self.assertIn("install -y --no-install-recommends linux-raspi-realtime", result.stdout)
+        self.assertIn("install -y --no-install-recommends --no-remove linux-raspi-realtime", result.stdout)
         self.assertNotIn("ubuntu-realtime", result.stdout)
         self.assertNotIn("RUN reboot", result.stdout)
         self.assertIn("reboot required", result.stdout)
@@ -57,7 +57,7 @@ echo "STATUS=$RT_KERNEL_STATUS"
     def test_install_reports_reboot_requirement(self):
         result = self.kernel()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("install -y --no-install-recommends linux-raspi-realtime", result.stdout)
+        self.assertIn("install -y --no-install-recommends --no-remove linux-raspi-realtime", result.stdout)
         self.assertIn("RT kernel installed; reboot required", result.stdout)
 
     def test_apt_failure_does_not_claim_kernel_installed(self):

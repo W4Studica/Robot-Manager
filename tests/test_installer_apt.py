@@ -28,7 +28,7 @@ class AptLockWaitTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(log.read_text().splitlines(), [
                 "-o DPkg::Lock::Timeout=600 update",
-                "-o DPkg::Lock::Timeout=600 install -y --no-install-recommends test-package",
+                "-o DPkg::Lock::Timeout=600 install -y --no-install-recommends --no-remove test-package",
             ])
             self.assertIn("Waiting up to 10 minutes", result.stdout)
 

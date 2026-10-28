@@ -174,7 +174,7 @@ apt_install_packages() {  # apt_install_packages <reason> <package>...
   info "Waiting up to 10 minutes for apt/dpkg locks held by automatic updates."
   run env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 update \
     || die "apt-get update failed; could not install $reason"
-  run env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y --no-install-recommends "$@" \
+  run env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y --no-install-recommends --no-remove "$@" \
     || die "apt could not install $reason ($*)"
 }
 
@@ -235,7 +235,7 @@ ensure_vmx_hal_sdk() {
     [ "$INSTALL_DEPS" = 1 ] || die "VMX HAL SDK is missing. Install it manually with: sudo apt-get install '$package'"
     [ "$DRY_RUN" = 1 ] || command -v apt-get >/dev/null 2>&1 || die "apt-get is required to install the VMX HAL SDK package"
     info "Installing VMX HAL SDK package: $package"
-    run env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y "$package" \
+    run env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y --no-remove "$package" \
       || die "could not install the VMX HAL SDK package: $package"
   elif [ "$DRY_RUN" = 1 ]; then
     warn "dry run: vmxpi-hal package not found; expected $SELF_DIR/../vmxpi-aarch64-hal-builder/dist/vmxpi-hal_*_arm64.deb"
@@ -442,7 +442,7 @@ check_deployed_wpilib_runtime() {
   local lib_dir="$ROBOT_HOME/wpilib/third-party/lib"
   local command_file="$ROBOT_HOME/robotCommand"
   local search_path="$lib_dir:/usr/local/lib/vmxpi:$PLUGIN_DIR:$OPT_DIR/lib"
-  local count=0 executable result library
+  local count=0 executable library name required_hal command_details active_extensions=""
   local -a libraries=()
   info "WPILib deployed runtime dependencies"
   if [ ! -d "$lib_dir" ] && [ ! -f "$command_file" ]; then
@@ -453,21 +453,8 @@ check_deployed_wpilib_runtime() {
     return 0
   fi
   command -v ldd >/dev/null 2>&1 || die "ldd is required to inspect deployed native dependencies"
-  if [ -d "$lib_dir" ]; then
-    mapfile -d '' -t libraries < <(find "$lib_dir" -type f \( -name '*.so' -o -name '*.so.*' \) ! -name '*.debug' -print0)
-    for library in "${libraries[@]}"; do
-      # The debug HAL extension needs libwpiHald/libwpiutild, which only a debug deploy has. A release deploy ships both
-      # extensions but not those libraries, and the program never loads the debug one then.
-      if [ "$(basename "$library")" = libhalsim_studicad.so ] && [ ! -f "$lib_dir/libwpiHald.so" ]; then
-        echo "  skipping libhalsim_studicad.so: this is a release deploy (no libwpiHald.so)"
-        continue
-      fi
-      verify_shared_library "$library" "$search_path"
-      count=$((count + 1))
-    done
-  fi
   if [ -f "$command_file" ]; then
-    executable="$(python3 - "$command_file" "$ROBOT_HOME" <<'PY'
+    command_details="$(python3 - "$command_file" "$ROBOT_HOME" <<'PY'
 import os
 import re
 import shlex
@@ -476,7 +463,11 @@ import sys
 with open(sys.argv[1], encoding="utf-8") as command_file:
     words = shlex.split(command_file.read())
 index = 0
+extensions = []
 while index < len(words) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[index]):
+    key, value = words[index].split("=", 1)
+    if key == "HALSIM_EXTENSIONS":
+        extensions = [os.path.basename(path) for path in value.split(":") if path]
     index += 1
 if index < len(words) and words[index] == "gdbserver":
     index += 2  # gdbserver and its :port argument
@@ -486,8 +477,36 @@ program = words[index]
 if not os.path.isabs(program):
     program = os.path.join(sys.argv[2], program)
 print(program)
+print(":".join(extensions))
 PY
 )" || die "could not read the executable from $command_file"
+    executable="${command_details%%$'\n'*}"
+    if [[ "$command_details" == *$'\n'* ]]; then
+      active_extensions=":${command_details#*$'\n'}:"
+    fi
+  fi
+  if [ -d "$lib_dir" ]; then
+    mapfile -d '' -t libraries < <(find "$lib_dir" -type f \( -name '*.so' -o -name '*.so.*' \) ! -name '*.debug' -print0)
+    for library in "${libraries[@]}"; do
+      name="$(basename "$library")"
+      required_hal=""
+      case "$name" in
+        libhalsim_studicad.so|libhalsim_vmxd.so) required_hal=libwpiHald.so ;;
+        libhalsim_studica.so|libhalsim_vmx.so) required_hal=libwpiHal.so ;;
+      esac
+      # Release ZIPs contain both extensions, and old deploys can leave the VMX
+      # names behind. Skip only the unused build type; an explicitly selected
+      # extension must still fail validation when its dependencies are missing.
+      if [ -n "$required_hal" ] && [ ! -f "$lib_dir/$required_hal" ] \
+          && [[ "$active_extensions" != *":$name:"* ]]; then
+        echo "  skipping $name: unused extension build type (no $required_hal)"
+        continue
+      fi
+      verify_shared_library "$library" "$search_path"
+      count=$((count + 1))
+    done
+  fi
+  if [ -f "$command_file" ]; then
     verify_shared_library "$executable" "$search_path"
     count=$((count + 1))
   fi
@@ -815,7 +834,9 @@ install_cpu_max() {
 ensure_system_profile_dependencies() {
   local package
   local -a profile_packages=()
-  for package in systemd-zram-generator util-linux e2fsprogs initramfs-tools; do
+  # Swap, fstab and journald configuration do not require a new initramfs.
+  # Installing initramfs-tools here would replace Ubuntu's existing dracut.
+  for package in systemd-zram-generator util-linux e2fsprogs; do
     dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q 'install ok installed' || profile_packages+=("$package")
   done
   if [ "${#profile_packages[@]}" -gt 0 ]; then
@@ -837,9 +858,7 @@ install_system_profile() {
       run systemctl mask "$unit"
     fi
   done
-  # Remove stale resume-device waits from every installed kernel, including a
-  # newly installed RT kernel. Do not reboot or remount the running root.
-  run update-initramfs -u -k all
+  # Existing kernel/initramfs tooling and firmware assets remain OS-managed.
   run systemctl daemon-reload
 }
 

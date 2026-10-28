@@ -159,6 +159,9 @@ def configure(root=Path("/"), run=command):
     features = run("tune2fs", "-l", device)
     if not any("has_journal" in line.split() for line in features.splitlines() if line.startswith("Filesystem features:")):
         raise RuntimeError("Root ext4 has no journal; enable it offline before using this profile")
+    mounted_options = run("findmnt", "-n", "-o", "OPTIONS", "--target", "/").split(",")
+    if any(option in {"data=writeback", "data=journal"} for option in mounted_options):
+        raise RuntimeError("Root journal data mode cannot be changed by remount; configure it offline before installation")
     boot_options = target("/proc/cmdline").read_text().split()
     if any(v in boot_options for v in ["systemd.zram=0", "systemd.zram=no", "systemd.zram=false", "systemd.zram=off"]):
         raise RuntimeError("Kernel command line disables zram; remove systemd.zram=0 before installation")
@@ -189,7 +192,6 @@ def configure(root=Path("/"), run=command):
         print("Network mounts present: keeping the existing network wait policy")
     else:
         atomic_write(wait, (PROFILE / "network-wait.conf").read_text())
-    atomic_write(target("/etc/initramfs-tools/conf.d/resume"), "# VMX uses swap for memory pressure, not hibernation.\nRESUME=none\n")
     atomic_write(fstab, after, stat.S_IMODE(fstab.stat().st_mode))
     print("Prepared: zram 8 GiB priority 100; disk swap 4 GiB priority 10")
     print("Existing swap files are preserved; old fstab swap entries are disabled at next boot")
