@@ -184,6 +184,7 @@ apt_install_packages() {  # apt_install_packages <reason> <package>...
 ensure_base_runtime_dependencies() {
   local -a packages=()
   command -v python3 >/dev/null 2>&1 || packages+=(python3)
+  dpkg-query -W -f='${Status}' btop 2>/dev/null | grep -q 'install ok installed' || packages+=(btop)
   # WPILib's RioLog client discovers the roboRIO-compatible endpoint as robot.local.
   # Publish that mDNS name even when the VMX image hostname is "vmx".
   dpkg-query -W -f='${Status}' avahi-daemon 2>/dev/null | grep -q 'install ok installed' || packages+=(avahi-daemon)
