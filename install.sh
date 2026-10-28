@@ -29,6 +29,7 @@
 #                         after NetworkManager starts, selects AP mode and deletes saved Wi-Fi profiles
 #  10. sudoers (opt-in)   lets the login user run the few sudo commands `gradlew deploy` uses, without a password
 #  11. PREEMPT_RT kernel  linux-raspi-realtime on Ubuntu >= 26.04; requires a manual reboot to activate
+#  12. storage/boot       ext4 protection, RAM journal, zram 8 GiB + disk swap 4 GiB (next boot; no OverlayFS)
 #
 # WPILib/CameraServer/cscore/OpenCV native libraries are deployed per robot project by GradleRIO from
 # that project's pinned dependency graph. The Linux UVC camera interface is provided by the kernel (V4L2);
@@ -78,6 +79,8 @@ Usage: ./install.sh [options]      (run on the robot; over SSH it continues as a
 
 Normal installation configures robot RT scheduling and installs the Raspberry Pi
 PREEMPT_RT kernel on Ubuntu >= 26.04. Reboot manually after installation to activate it.
+Also configures ext4 protection, volatile logs, 8 GiB zram and 4 GiB disk swap
+for the next boot. Existing swap is not switched off during installation.
 
 Options:
   --user NAME              login user that deploys to this robot (default: invoking user or SUDO_USER)
@@ -379,6 +382,8 @@ validate_install_inputs() {
       || warn "dry run: Studica source is not present under $AW_DIR"
     return 0
   fi
+  [ -f "$RM_DIR/system/storage/configure.py" ] \
+    || die "storage profile sources not found under $RM_DIR/system/storage"
   [ -f "$RM_DIR/Cargo.toml" ] && [ -f "$RM_DIR/Cargo.lock" ] && [ -f "$RM_DIR/robot_manager.service" ] \
     || die "Cargo.toml / Cargo.lock / robot_manager.service not found in $RM_DIR (use --robot-manager-dir)"
 
@@ -796,6 +801,37 @@ install_cpu_max() {
   fi
 }
 
+ensure_system_profile_dependencies() {
+  local package
+  local -a profile_packages=()
+  for package in systemd-zram-generator util-linux e2fsprogs initramfs-tools; do
+    dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q 'install ok installed' || profile_packages+=("$package")
+  done
+  if [ "${#profile_packages[@]}" -gt 0 ]; then
+    apt_install_packages "storage and boot configuration tools" "${profile_packages[@]}"
+  fi
+}
+
+install_system_profile() {
+  info "Storage protection and boot configuration (applied at next reboot)"
+  info "zram 8 GiB priority 100; disk swap 4 GiB priority 10; volatile logs capped at 64 MiB"
+  info "ext4 journal and write barriers retained; no RAM OverlayFS; network wait bounded unless network mounts exist"
+  run python3 "$RM_DIR/system/storage/configure.py"
+  # Only disable competing managers for the next boot. swapoff may cause OOM
+  # or stall a live robot; persistent syslog writers also stop at the reboot.
+  local unit
+  for unit in dphys-swapfile.service zramswap.service zram-config.service rsyslog.service rsyslog.socket; do
+    if systemctl list-unit-files "$unit" --no-legend 2>/dev/null | awk '{print $1}' | grep -Fxq "$unit"; then
+      run systemctl disable "$unit"
+      run systemctl mask "$unit"
+    fi
+  done
+  # Remove stale resume-device waits from every installed kernel, including a
+  # newly installed RT kernel. Do not reboot or remount the running root.
+  run update-initramfs -u -k all
+  run systemctl daemon-reload
+}
+
 # Makes NetworkManager the network manager (Ubuntu Server ships systemd-networkd + netplan) and sets up the Wi-Fi access
 # point and the wired port. Everything is written first, while the ssh session still works; the switch itself runs a few
 # seconds after install.sh has finished, because it ends the session.
@@ -943,6 +979,8 @@ summary() {
   config:    $CONF_DIR/config.json   (robot_home = $ROBOT_HOME)
   RT kernel: $RT_KERNEL_STATUS
   RT policy: $CONF_DIR/config.json realtime (new/legacy default: auto, SCHED_RR, priority 10; existing policies preserved)
+  next boot: zram 8 GiB + disk swap 4 GiB; volatile logs (64 MiB); ext4 protection; no OverlayFS
+  boot check: systemd-analyze critical-chain $SERVICE.service
   plugin:    $PLUGIN_DIR/libstudica_hardware.so   (hardware plugin; no environment override)
   shim:      $OPT_DIR/lib/libvmx_gpio_isr_shim.so   -> LD_PRELOAD (only on kernels without /sys/class/gpio)
   lse emu:   $OPT_DIR/lib/libvmx_lse_emu.so   -> LD_AUDIT, set by robot_manager on CPUs without LSE atomics
@@ -1005,6 +1043,7 @@ fi
 
 preflight
 ensure_base_runtime_dependencies
+ensure_system_profile_dependencies
 ensure_rt_kernel
 ensure_vmx_hal_sdk
 validate_install_inputs
@@ -1017,9 +1056,11 @@ install_studica_notices
 install_shim
 install_lse_emu
 install_cpu_max
+install_system_profile
 install_network
 install_sudoers
 # A library problem in the deployed program is reported, but must not stop the service from being restarted.
 ( check_deployed_wpilib_runtime ) || warn "deployed libraries have unresolved dependencies (see above); robot_manager is restarted anyway"
 restart_service
+run sync
 summary
