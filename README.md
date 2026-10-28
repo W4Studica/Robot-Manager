@@ -1,6 +1,6 @@
 # robot_manager
 
-What the W4Studica software puts on a Studica VMX-pi: a service that runs the robot program, the helpers that make WPILib 2027 run on the VMX's Raspberry Pi 4, the network setup, and the installer. `robot_manager` is a Rust executable that replaces the roboRIO `robot` service. The daemon has no Python runtime dependency; the network and installation helpers still use Python 3.
+What the W4Studica software puts on a Studica VMX-pi: a service that runs the robot program, the helpers that make WPILib 2027 run on the VMX's Raspberry Pi 4, the network setup, and the installer. `robot_manager` is a Rust executable that replaces the roboRIO `robot` service. The daemon and network commands run from the same Rust executable, without a Python runtime dependency. The installer and runtime inventory helper still use Python 3.
 
 ## What it does
 
@@ -76,7 +76,7 @@ cd Robot-Manager
 
 It installs `robot_manager` and its service, `studica_drivers`, the Studica backend plugin (`/opt/halsim_studica/`, needs g++ 11 or newer; GCC 11 is installed if the default is older), the GPIO shim, the LSE emulation, the CPU service, the network commands and setup, and (with `--sudoers`) passwordless `sudo` for the deploy login, limited to `systemctl stop|start|enable robot_manager`, `ldconfig` and `sync`. Missing apt packages are installed (`--no-install-deps` lists them and exits). The service is restarted last.
 
-The installer builds the daemon with `cargo build --release --locked` (Rust 1.85 or newer). Missing Cargo/Rust packages are installed through apt. The first build needs access to crates.io. To use a prebuilt executable for the robot, pass `--manager-binary /path/to/robot_manager`; Cargo is then unnecessary on the robot. Existing JSON configuration is retained and validated before the service is enabled.
+The installer builds the daemon and network commands together with `cargo build --release --locked` (Rust 1.85 or newer). Missing Cargo/Rust packages are installed through apt. The first build needs access to crates.io. To use a prebuilt executable for the robot, pass `--manager-binary /path/to/robot_manager`; Cargo is then unnecessary on the robot. Existing JSON configuration is retained and validated before the service is enabled.
 
 The VMX SDK (`VMXPi.h`, `libvmxpi_hal_cpp.so`) is not part of Ubuntu or WPILib. It comes with the robot image, or from `../vmxpi-aarch64-hal-builder/dist/vmxpi-hal_*_arm64.deb` (or `--vmx-hal-deb FILE`). Use `--skip-drivers`, `--skip-plugin`, `--skip-shim`, `--skip-lse-emu` or `--skip-cpu-max` to leave parts out; see `./install.sh --help`.
 
@@ -104,10 +104,33 @@ GradleRIO's `VmxPi` target deploys with `sudo systemctl stop/start/enable robot_
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test --locked
-python3 -m unittest discover -s tests     # network, CPU, inventory and installer helpers
+python3 -m unittest discover -s tests     # CPU, inventory and installer checks
 ```
 
 The daemon is split into `src/config.rs`, `src/process.rs`, `src/manager.rs`, `src/output.rs` and `src/riolog.rs`. `src/main.rs` handles the CLI and signal registration. `--check-config` validates a file without opening a console or starting a robot program.
+
+Network code lives in `src/network/`: `profiles.rs` generates NetworkManager keyfiles,
+`mod.rs` handles AP/Ethernet/router switching and SSH deferral, `backup.rs` preserves
+and restores the first network configuration, `system.rs` isolates Linux commands,
+and `cli.rs` parses the network commands. Network tests use temporary directories
+and a fake command runner; they do not change the test machine's network.
+
+The installer links `/opt/robot_manager/net/vmx_net` and
+`/opt/robot_manager/bin/network_backup` to `/opt/robot_manager/robot_manager`.
+`setupHotspot`, `setupEthernet` and `toggleNetMode` keep their existing names and
+arguments. Direct commands are also available without the symlinks:
+
+```bash
+/opt/robot_manager/robot_manager network status
+/opt/robot_manager/robot_manager network sshdevice
+sudo /opt/robot_manager/robot_manager network-backup snapshot
+sudo /opt/robot_manager/robot_manager network-backup restore
+```
+
+Existing schema-version-1 backups from the Python tool remain readable. Reinstalling
+preserves the first backup. Keyfiles are replaced atomically with mode `0600`,
+and the backup directory is private (`0700`). The installer removes the retired
+Python network scripts after updating the command links.
 
 Cross build with a matching Rust target and an aarch64 GNU linker:
 

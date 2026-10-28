@@ -9,9 +9,9 @@
 set -eu
 
 [ "$(id -u)" = 0 ] || { echo "run it with sudo" >&2; exit 1; }
-SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
+MANAGER="${ROBOT_MANAGER_BINARY:-/opt/robot_manager/robot_manager}"
 if [ "$#" = 0 ] && [ -f /var/lib/robot_manager/network-original/state.json ]; then
-  exec python3 "$SCRIPT_DIR/network_backup.py" restore
+  exec "$MANAGER" network-backup restore
 fi
 
 # Compatibility with the old installer's netplan-only backups. Pick the oldest

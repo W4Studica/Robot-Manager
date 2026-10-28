@@ -2,6 +2,7 @@
 
 pub mod config;
 pub mod manager;
+pub mod network;
 pub mod output;
 pub mod process;
 pub mod riolog;

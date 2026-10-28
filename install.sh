@@ -172,7 +172,7 @@ ensure_base_runtime_dependencies() {
     apt_install_packages "robot_manager and native-library runtime tools" "${packages[@]}"
   fi
   if [ "$DRY_RUN" != 1 ]; then
-    command -v python3 >/dev/null 2>&1 || die "python3 is required for network and installation helpers"
+    command -v python3 >/dev/null 2>&1 || die "python3 is required for installation helpers"
     if ! command -v ldd >/dev/null 2>&1 || ! command -v ldconfig >/dev/null 2>&1; then
       die "ldd and ldconfig are required to validate native runtime dependencies"
     fi
@@ -385,8 +385,8 @@ validate_install_inputs() {
     [ -f "$RM_DIR/lse_emu/lse_emu.c" ] \
       || die "LSE emulator source is missing from $RM_DIR (or pass --skip-lse-emu)"
   fi
-  [ -f "$RM_DIR/net/vmx_net.py" ] || die "network command source is missing from $RM_DIR"
-  [ -f "$RM_DIR/system/network_backup.py" ] || die "network backup source is missing from $RM_DIR"
+  [ -f "$RM_DIR/src/network/mod.rs" ] || die "Rust network command source is missing from $RM_DIR"
+  [ -f "$RM_DIR/src/network/backup.rs" ] || die "Rust network backup source is missing from $RM_DIR"
   if [ "$WITH_SUDOERS" = 1 ]; then
     command -v visudo >/dev/null 2>&1 || die "visudo is required to validate --sudoers rules"
   fi
@@ -499,6 +499,8 @@ install_robot_manager() {
   fi
   if [ "$DRY_RUN" != 1 ]; then
     "$binary" --version || die "robot_manager binary cannot run on this robot"
+    "$binary" network --help >/dev/null || die "robot_manager binary is missing Rust network commands"
+    "$binary" network-backup --help >/dev/null || die "robot_manager binary is missing Rust network backup"
   fi
   run install -d -m 0755 "$OPT_DIR" "$CONF_DIR"
   # Replace atomically: an already running Rust service may still hold the old executable open.
@@ -685,7 +687,7 @@ install_cpu_max() {
 apply_network() {
   # Preserve the first configuration before apt can start a newly installed NM.
   # Neither the active manager nor saved Wi-Fi profiles are changed here.
-  run python3 "$OPT_DIR/bin/network_backup.py" snapshot
+  run "$OPT_DIR/bin/network_backup" snapshot
 
   local missing=0
   command -v nmcli >/dev/null 2>&1 || missing=1
@@ -706,8 +708,8 @@ apply_network() {
 
   # The connection files: written for NetworkManager, which has not started yet.
   run install -d -m 0755 /etc/NetworkManager/system-connections
-  run "$OPT_DIR/net/vmx_net.py" setupEthernet --no-activate
-  run "$OPT_DIR/net/vmx_net.py" setupHotspot --no-activate "$AP_SSID" "$AP_TEAM" "$AP_BAND" "$AP_PASSWORD"
+  run "$OPT_DIR/net/vmx_net" setupEthernet --no-activate
+  run "$OPT_DIR/net/vmx_net" setupHotspot --no-activate "$AP_SSID" "$AP_TEAM" "$AP_BAND" "$AP_PASSWORD"
 
   # The original is immutable across reinstalls. Only remove active YAML after
   # dependencies are ready and the snapshot has completed successfully.
@@ -731,7 +733,8 @@ CFG
   run install -m 0755 "$RM_DIR/system/undo_network.sh" "$OPT_DIR/bin/undo_network.sh"
   run install -m 0755 "$RM_DIR/system/apply_network.sh" "$OPT_DIR/bin/apply_network.sh"
 
-  local address; address="$(python3 -c "import sys; t=int(sys.argv[1]); print('10.%d.%d.2' % (t//100, t%100))" "$AP_TEAM")"
+  local team_number=$((10#$AP_TEAM)) address
+  address="10.$((team_number / 100)).$((team_number % 100)).2"
   cat <<MSG
   Network prepared. In 8 seconds the robot switches to NetworkManager, applies setupHotspot and selects AP mode.
   Saved Wi-Fi profiles are deleted:
@@ -750,20 +753,30 @@ MSG
 undo_network() {
   info "Undo installer network setup"
   [ -f "$RM_DIR/system/undo_network.sh" ] || die "$RM_DIR/system/undo_network.sh not found"
-  run sh "$RM_DIR/system/undo_network.sh"
+  local binary="${MANAGER_BINARY:-$OPT_DIR/robot_manager}"
+  # An older installation may have Python-only network helpers. Build the new
+  # restore command without replacing its running service or touching the network.
+  if [ "$DRY_RUN" != 1 ] && [ -f /var/lib/robot_manager/network-original/state.json ] \
+      && ! "$binary" network-backup --help >/dev/null 2>&1; then
+    [ -z "$MANAGER_BINARY" ] || die "--manager-binary is missing Rust network backup"
+    ensure_base_runtime_dependencies
+    ensure_rust_build_dependencies
+    run cargo build --release --locked --manifest-path "$RM_DIR/Cargo.toml" --target-dir "$BUILD_DIR/robot_manager"
+    binary="$BUILD_DIR/robot_manager/release/robot_manager"
+  fi
+  run env ROBOT_MANAGER_BINARY="$binary" sh "$RM_DIR/system/undo_network.sh"
 }
 
 install_network() {
   info "Network (Wi-Fi access point and fixed wired address)"
-  local src="$RM_DIR/net/vmx_net.py"
-  [ -f "$src" ] || { warn "$src not found; skipping the network commands"; return; }
   run install -d "$OPT_DIR/net" "$OPT_DIR/bin"
-  run install -m 0755 "$src" "$OPT_DIR/net/vmx_net.py"
-  run install -m 0755 "$RM_DIR/system/network_backup.py" "$OPT_DIR/bin/network_backup.py"
+  run ln -sf "$OPT_DIR/robot_manager" "$OPT_DIR/net/vmx_net"
+  run ln -sf "$OPT_DIR/robot_manager" "$OPT_DIR/bin/network_backup"
   local cmd
   for cmd in setupHotspot toggleNetMode setupEthernet; do
-    run ln -sf "$OPT_DIR/net/vmx_net.py" "/usr/local/bin/$cmd"
+    run ln -sf "$OPT_DIR/net/vmx_net" "/usr/local/bin/$cmd"
   done
+  run rm -f "$OPT_DIR/net/vmx_net.py" "$OPT_DIR/bin/network_backup.py"
   echo "  installed: setupHotspot, toggleNetMode, setupEthernet"
 
   apply_network

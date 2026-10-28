@@ -14,6 +14,15 @@ fn main() {
     }
 }
 fn run() -> io::Result<()> {
+    if let Some(result) = robot_manager::network::cli::dispatch_os(
+        &std::env::args_os().collect::<Vec<_>>(),
+        &robot_manager::network::Network::default(),
+        &mut robot_manager::network::system::Linux,
+    ) {
+        use std::io::Write;
+        io::stdout().write_all(result?.as_bytes())?;
+        return Ok(());
+    }
     let mut path = PathBuf::from(config::DEFAULT_CONFIG);
     let mut check = false;
     let mut args = std::env::args_os().skip(1);
@@ -30,7 +39,7 @@ fn run() -> io::Result<()> {
             }
             Some("--check-config") => check = true,
             Some("--help" | "-h") => {
-                println!("robot_manager [--config PATH] [--check-config]\nRun and supervise the VMX robot program.\nDefault config: {}", config::DEFAULT_CONFIG);
+                println!("robot_manager [--config PATH] [--check-config]\nRun and supervise the VMX robot program.\nNetworking: robot_manager network --help\nDefault config: {}", config::DEFAULT_CONFIG);
                 return Ok(());
             }
             Some("--version" | "-V") => {
