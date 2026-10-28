@@ -6,6 +6,10 @@ After=network.target
 Type=simple
 # root: the VMX HAL (pigpio) needs /dev/mem
 User=root
+# The supervisor and its journal/RioLog workers stay on normal scheduling.
+# Robot Manager applies RT policy only to the robot child before exec.
+CPUSchedulingPolicy=other
+LimitRTPRIO=99
 ExecStart=/opt/robot_manager/robot_manager --config /etc/robot_manager/config.json
 Restart=always
 RestartSec=2

@@ -59,12 +59,32 @@ fn run() -> io::Result<()> {
         println!("configuration valid: {}", path.display());
         return Ok(());
     }
+    let supervisor = robot_manager::realtime::configure_supervisor()?;
+    robot_manager::log(
+        "INFO",
+        format_args!(
+            "supervisor scheduling: {}/{}",
+            supervisor.name(),
+            supervisor.priority
+        ),
+    );
     let stopping = Arc::new(AtomicBool::new(false));
     // Signal callbacks only set an atomic flag; shutdown and waitpid run in the
     // supervisor's normal control flow, never inside a signal handler.
     signal_hook::flag::register(libc::SIGTERM, stopping.clone())?;
     signal_hook::flag::register(libc::SIGINT, stopping.clone())?;
     let kernel = std::fs::read_to_string("/proc/sys/kernel/osrelease")?;
+    let rt_kernel = robot_manager::realtime::kernel_rt(std::path::Path::new("/"));
+    let kernel_state = match rt_kernel {
+        Some(true) => "detected",
+        Some(false) => "not detected",
+        None => "unknown",
+    };
+    let requested = config.realtime.target();
+    robot_manager::log("INFO", format_args!(
+        "PREEMPT_RT kernel: {kernel_state}; robot RT mode: {:?}, requested policy: {}/{}; userspace scheduling does not enable PREEMPT_RT",
+        config.realtime.mode, requested.name(), requested.priority
+    ));
     let has_lse = std::fs::read_to_string("/proc/cpuinfo")
         .ok()
         .and_then(|text| config::cpu_has_lse(&text));
@@ -90,6 +110,7 @@ fn run() -> io::Result<()> {
         policy: Policy {
             stop_grace: config.stop_grace()?,
             stop_signals: config.signals(),
+            realtime: config.realtime,
             ..Policy::default()
         },
         stopping,

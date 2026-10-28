@@ -21,6 +21,8 @@ pub struct Profile {
 #[derive(Debug, Deserialize)]
 pub struct Config {
     pub robot_home: PathBuf,
+    #[serde(default)]
+    pub realtime: crate::realtime::Settings,
     pub robot_command: Option<PathBuf>,
     #[serde(default)]
     pub env: HashMap<String, Value>,
@@ -103,6 +105,7 @@ impl Config {
             return Err(invalid("robot_home must not be empty"));
         }
         self.stop_grace()?;
+        self.realtime.prepare()?;
         if self.stop_signals.is_empty()
             || self.stop_signals.iter().any(|s| signal_number(s).is_none())
         {

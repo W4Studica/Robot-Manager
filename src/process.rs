@@ -3,7 +3,7 @@ use crate::output::{Journal, LineSink, OutputReader};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io;
-use std::os::fd::{FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -64,6 +64,7 @@ pub struct ChildGroup {
     pgid: i32,
     output: Option<OutputReader>,
     cleaned: bool,
+    scheduling: crate::realtime::Report,
 }
 impl ChildGroup {
     pub fn spawn(
@@ -72,7 +73,11 @@ impl ChildGroup {
         env: &HashMap<String, String>,
         journal: Journal,
         console: Option<Arc<dyn LineSink>>,
+        realtime: crate::realtime::Settings,
     ) -> io::Result<Self> {
+        let scheduling = realtime.prepare()?;
+        let (mut scheduling_read, scheduling_write) = output_pipe()?;
+        let report_fd = scheduling_write.as_raw_fd();
         let (read, write) = output_pipe()?;
         let stderr = write.try_clone()?;
         let mut command = Command::new("/bin/sh");
@@ -84,28 +89,53 @@ impl ChildGroup {
             .stdin(Stdio::null())
             .stdout(Stdio::from(write))
             .stderr(Stdio::from(stderr));
-        // SAFETY: after fork, the closure calls only setsid and captures no
-        // allocator, logger or mutex. Error::last_os_error stores errno inline.
+        // SAFETY: the closure captures only validated Copy values. It calls
+        // async-signal-safe syscalls without allocation, logging or locks.
         unsafe {
-            command.pre_exec(|| {
+            command.pre_exec(move || {
                 if libc::setsid() < 0 {
-                    Err(io::Error::last_os_error())
-                } else {
-                    Ok(())
+                    return Err(io::Error::last_os_error());
                 }
+                scheduling.apply_and_report(report_fd)
             });
         }
-        let child = command.spawn()?;
+        let spawned = command.spawn();
+        drop(scheduling_write);
+        drop(command);
+        let child = match spawned {
+            Ok(child) => child,
+            Err(error) => {
+                if let Ok(report) = crate::realtime::Report::read(&mut scheduling_read) {
+                    if report.fatal_errno != 0 {
+                        return Err(io::Error::other(format!(
+                            "robot scheduling setup failed: {}",
+                            io::Error::from_raw_os_error(report.fatal_errno)
+                        )));
+                    }
+                }
+                return Err(error);
+            }
+        };
         let pgid = i32::try_from(child.id()).map_err(io::Error::other)?;
         let mut group = Self {
             child,
             pgid,
             output: None,
             cleaned: false,
+            scheduling: crate::realtime::Report {
+                actual: crate::realtime::Snapshot::NORMAL,
+                fallback_errno: 0,
+                fatal_errno: 0,
+            },
         };
+        group.scheduling = crate::realtime::Report::read(&mut scheduling_read)?;
+        group.scheduling.log();
         // The process is already owned if starting the reader thread fails.
         group.output = Some(OutputReader::start(read, journal, console)?);
         Ok(group)
+    }
+    pub fn scheduling(&self) -> crate::realtime::Report {
+        self.scheduling
     }
     pub fn id(&self) -> i32 {
         self.pgid

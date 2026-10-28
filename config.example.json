@@ -1,5 +1,6 @@
 {
   "robot_home": "/home/CHANGE_ME",
+  "realtime": { "mode": "auto", "policy": "rr", "priority": 10 },
   "stop_grace_seconds": 5,
   "stop_signals": ["SIGINT", "SIGTERM"],
   "riolog_enabled": true,

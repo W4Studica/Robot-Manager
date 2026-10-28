@@ -34,6 +34,10 @@ fn policy() -> Policy {
         min_uptime: Duration::from_millis(300),
         wait_poll: Duration::from_millis(20),
         stop_grace: Duration::from_millis(400),
+        realtime: robot_manager::realtime::Settings {
+            mode: robot_manager::realtime::Mode::Off,
+            ..Default::default()
+        },
         ..Policy::default()
     }
 }

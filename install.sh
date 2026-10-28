@@ -526,6 +526,7 @@ install_robot_manager() {
     write_file "$CONF_DIR/config.json" 0644 <<EOF
 {
   "robot_home": "$ROBOT_HOME",
+  "realtime": { "mode": "auto", "policy": "rr", "priority": 10 },
   "env": {},
   "profiles": []
 }

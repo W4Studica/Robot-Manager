@@ -5,6 +5,7 @@ pub mod manager;
 pub mod network;
 pub mod output;
 pub mod process;
+pub mod realtime;
 pub mod riolog;
 
 pub fn log(level: &str, message: impl std::fmt::Display) {

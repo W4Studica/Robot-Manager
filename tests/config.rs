@@ -126,3 +126,36 @@ fn lse_off_and_missing_library_leave_the_environment_unchanged() {
             .is_empty());
     }
 }
+
+#[test]
+fn realtime_defaults_enable_auto_rr_and_explicit_modes_are_validated() {
+    use robot_manager::realtime::{Mode, Policy};
+    let default = Config::parse(r#"{"robot_home":"/x"}"#).unwrap();
+    assert_eq!(default.realtime.mode, Mode::Auto);
+    assert_eq!(default.realtime.policy, Policy::Rr);
+    assert_eq!(default.realtime.priority, 10);
+    for mode in ["auto", "on", "off"] {
+        for policy in ["rr", "fifo"] {
+            for priority in [1, 10, 99] {
+                Config::parse(&json!({"robot_home":"/x", "realtime":{"mode":mode,"policy":policy,"priority":priority}}).to_string()).unwrap();
+            }
+        }
+    }
+    for realtime in [
+        json!({"mode":"maybe"}),
+        json!({"policy":"other"}),
+        json!({"priority":0}),
+        json!({"priority":100}),
+        json!({"priority":-1}),
+        json!({"priority":"10"}),
+        json!({"priority":2.5}),
+        json!({"priority":null}),
+        json!({"priorty":90}),
+        json!(null),
+        json!(true),
+    ] {
+        assert!(
+            Config::parse(&json!({"robot_home":"/x", "realtime":realtime}).to_string()).is_err()
+        );
+    }
+}

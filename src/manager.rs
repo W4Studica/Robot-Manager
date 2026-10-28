@@ -16,6 +16,7 @@ pub struct Policy {
     pub wait_poll: Duration,
     pub stop_grace: Duration,
     pub stop_signals: Vec<i32>,
+    pub realtime: crate::realtime::Settings,
 }
 impl Default for Policy {
     fn default() -> Self {
@@ -26,6 +27,7 @@ impl Default for Policy {
             wait_poll: Duration::from_secs(2),
             stop_grace: Duration::from_secs(5),
             stop_signals: vec![libc::SIGINT, libc::SIGTERM],
+            realtime: crate::realtime::Settings::default(),
         }
     }
 }
@@ -67,6 +69,7 @@ impl Manager {
                 &self.env,
                 self.journal.clone(),
                 self.console.clone(),
+                self.policy.realtime,
             ) {
                 Ok(group) => group,
                 Err(error) => {

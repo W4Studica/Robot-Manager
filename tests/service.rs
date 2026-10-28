@@ -15,7 +15,7 @@ impl Service {
         fs::write(
             home.path().join("config.json"),
             json!({"robot_home":home.path(),
-            "stop_grace_seconds":0.5, "riolog_enabled":false})
+            "stop_grace_seconds":0.5, "riolog_enabled":false, "realtime":{"mode":"off"}})
             .to_string(),
         )
         .unwrap();
