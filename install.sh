@@ -13,7 +13,7 @@
 # to systemd on the robot before privilege escalation can lose the SSH session context.
 #
 # What it does (required build/runtime dependencies are installed when missing; optional steps have explicit --skip flags):
-#   1. robot_manager      /opt/robot_manager, /etc/robot_manager/config.json (only if missing),
+#   1. robot_manager      /opt/robot_manager, /etc/robot_manager/config.json (adds missing RT settings),
 #                         systemd service robot_manager (enabled and restarted); serves RioLog on TCP 1741
 #   2. RioLog discovery   Avahi publishes robot.local, the hostname used by WPILib's RioLog client
 #   3. VMX HAL SDK         installs vmxpi-hal .deb from the sibling builder's dist/ when headers/libs are missing
@@ -28,6 +28,7 @@
 #   9. network             configures the WorldSkills-1234 Wi-Fi access point and wired port 172.22.11.2;
 #                         after NetworkManager starts, selects AP mode and deletes saved Wi-Fi profiles
 #  10. sudoers (opt-in)   lets the login user run the few sudo commands `gradlew deploy` uses, without a password
+#  11. PREEMPT_RT kernel  linux-raspi-realtime on Ubuntu >= 26.04; requires a manual reboot to activate
 #
 # WPILib/CameraServer/cscore/OpenCV native libraries are deployed per robot project by GradleRIO from
 # that project's pinned dependency graph. The Linux UVC camera interface is provided by the kernel (V4L2);
@@ -55,6 +56,8 @@ SKIP_PLUGIN=0
 SKIP_SHIM=0
 SKIP_LSE_EMU=0
 SKIP_CPU_MAX=0
+SKIP_RT_KERNEL=0
+RT_KERNEL_STATUS="not checked"
 UNDO_NETWORK=0
 CHECK_RUNTIME_DEPS=0
 CLEANUP_PACKAGES=0
@@ -73,6 +76,9 @@ usage() {
   cat <<'EOF'
 Usage: ./install.sh [options]      (run on the robot; over SSH it continues as a systemd job)
 
+Normal installation configures robot RT scheduling and installs the Raspberry Pi
+PREEMPT_RT kernel on Ubuntu >= 26.04. Reboot manually after installation to activate it.
+
 Options:
   --user NAME              login user that deploys to this robot (default: invoking user or SUDO_USER)
   --robot-home DIR         robot_home for robot_manager (default: /home/<user>)
@@ -89,6 +95,7 @@ Options:
   --skip-shim              do not build the GPIO interrupt shim (libvmx_gpio_isr_shim.so)
   --skip-lse-emu           do not build the LSE atomics emulation (libvmx_lse_emu.so)
   --skip-cpu-max           do not pin the CPU at its highest frequency (robot_cpu_max.service)
+  --skip-rt-kernel         keep the current kernel; still configure robot RT scheduling
   --undo-network           restore the saved pre-install network configuration and exit
   --check-runtime-deps     inspect the deployed robotCommand and GradleRIO .so files with ldd, then exit
   --cleanup-packages       purge optional Ubuntu image tooling and exit (--dry-run previews the removal plan)
@@ -122,6 +129,7 @@ while [ $# -gt 0 ]; do
     --skip-shim) SKIP_SHIM=1 ;;
     --skip-lse-emu) SKIP_LSE_EMU=1 ;;
     --skip-cpu-max) SKIP_CPU_MAX=1 ;;
+    --skip-rt-kernel) SKIP_RT_KERNEL=1 ;;
     --undo-network) UNDO_NETWORK=1 ;;
     --check-runtime-deps) CHECK_RUNTIME_DEPS=1 ;;
     --cleanup-packages) CLEANUP_PACKAGES=1 ;;
@@ -501,6 +509,92 @@ ensure_rust_build_dependencies() {
   fi
 }
 
+rt_kernel_active() {
+  if [ -r /sys/kernel/realtime ]; then
+    [ "$(cat /sys/kernel/realtime)" = 1 ]
+  else
+    grep -qw PREEMPT_RT /proc/version
+  fi
+}
+
+rt_kernel_platform_supported() {
+  local ID="" VERSION_ID="" model=""
+  [ -r /etc/os-release ] || return 1
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  [ "$ID" = ubuntu ] && dpkg --compare-versions "$VERSION_ID" ge 26.04 || return 1
+  [ "$(uname -m)" = aarch64 ] || return 1
+  [ -r /proc/device-tree/model ] || return 1
+  model="$(tr -d '\0' < /proc/device-tree/model)"
+  [[ "$model" = Raspberry\ Pi* ]]
+}
+
+ensure_rt_kernel() {
+  info "PREEMPT_RT kernel"
+  if rt_kernel_active; then
+    RT_KERNEL_STATUS="PREEMPT_RT active"
+    echo "  $RT_KERNEL_STATUS ($(uname -r))"
+    return
+  fi
+  if [ "$SKIP_RT_KERNEL" = 1 ]; then
+    RT_KERNEL_STATUS="kernel installation skipped; robot scheduling is still configured"
+    echo "  $RT_KERNEL_STATUS (--skip-rt-kernel)"
+    return
+  fi
+  if [ "$DRY_RUN" != 1 ] && ! rt_kernel_platform_supported; then
+    die "automatic RT kernel installation requires Ubuntu >= 26.04 on a Raspberry Pi (aarch64). Install a compatible PREEMPT_RT kernel manually or use --skip-rt-kernel."
+  fi
+  # Ubuntu >= 26.04 provides this Pi-specific metapackage in its main archive.
+  # Never install the generic ubuntu-realtime kernel on the VMX's Raspberry Pi.
+  # https://ubuntu.com/real-time/docs/how-to/enable-real-time-ubuntu/
+  if ! dpkg-query -W -f='${Status}' linux-raspi-realtime 2>/dev/null | grep -q 'install ok installed'; then
+    apt_install_packages "Raspberry Pi PREEMPT_RT kernel" linux-raspi-realtime
+  fi
+  RT_KERNEL_STATUS="RT kernel installed; reboot required, then verify /sys/kernel/realtime = 1"
+  if [ "$DRY_RUN" = 1 ]; then
+    RT_KERNEL_STATUS="would install linux-raspi-realtime if missing; reboot required to activate"
+  fi
+  warn "$RT_KERNEL_STATUS. The installer does not reboot automatically."
+}
+
+configure_realtime() {
+  # Keep existing explicit policies (including off) and all unrelated settings.
+  # Older configurations did not have a realtime object at all.
+  python3 - "$CONF_DIR/config.json" "$DRY_RUN" <<'PY'
+import json
+import os
+from pathlib import Path
+import stat
+import sys
+import tempfile
+
+path = Path(sys.argv[1])
+config = json.loads(path.read_text(encoding="utf-8"))
+if not isinstance(config, dict):
+    raise SystemExit(f"{path}: configuration must be a JSON object")
+if "realtime" in config:
+    print(f"  keeping existing RT policy in {path}")
+    raise SystemExit(0)
+config["realtime"] = {"mode": "auto", "policy": "rr", "priority": 10}
+if sys.argv[2] == "1":
+    print(f"[dry-run] add realtime auto/rr/10 to {path}")
+    raise SystemExit(0)
+metadata = path.stat()
+fd, name = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as output:
+        json.dump(config, output, indent=2)
+        output.write("\n")
+        os.fchown(output.fileno(), metadata.st_uid, metadata.st_gid)
+        os.fchmod(output.fileno(), stat.S_IMODE(metadata.st_mode))
+    os.replace(name, path)
+finally:
+    if os.path.exists(name):
+        os.unlink(name)
+print(f"  added RT policy auto/rr/10 to {path}")
+PY
+}
+
 install_robot_manager() {
   info "robot_manager (Rust)"
   local binary="$MANAGER_BINARY"
@@ -520,7 +614,7 @@ install_robot_manager() {
   run install -m 0644 "$RM_DIR/robot_manager.service" "/etc/systemd/system/$SERVICE.service"
 
   if [ -f "$CONF_DIR/config.json" ]; then
-    echo "  keeping existing $CONF_DIR/config.json"
+    configure_realtime
   else
     # The platform profile list is left empty on purpose: the pin-number offset it would carry is not known yet.
     write_file "$CONF_DIR/config.json" 0644 <<EOF
@@ -838,6 +932,8 @@ summary() {
 ==> Done$( [ "$DRY_RUN" = 1 ] && echo " (dry run: nothing was changed)" )
   service:   systemctl status $SERVICE      logs: journalctl -u $SERVICE -f
   config:    $CONF_DIR/config.json   (robot_home = $ROBOT_HOME)
+  RT kernel: $RT_KERNEL_STATUS
+  RT policy: $CONF_DIR/config.json realtime (new/legacy default: auto, SCHED_RR, priority 10; existing policies preserved)
   plugin:    $PLUGIN_DIR/libstudica_hardware.so   -> HALSIMSTUDICA_BACKEND
   shim:      $OPT_DIR/lib/libvmx_gpio_isr_shim.so   -> LD_PRELOAD (only on kernels without /sys/class/gpio)
   lse emu:   $OPT_DIR/lib/libvmx_lse_emu.so   -> LD_AUDIT, set by robot_manager on CPUs without LSE atomics
@@ -900,6 +996,7 @@ fi
 
 preflight
 ensure_base_runtime_dependencies
+ensure_rt_kernel
 ensure_vmx_hal_sdk
 validate_install_inputs
 ensure_build_dependencies
