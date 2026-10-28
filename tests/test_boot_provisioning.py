@@ -93,7 +93,7 @@ class NetworkWaitTests(unittest.TestCase):
     def query(self, *args):
         if args[2] == "remote-fs.target":
             return "remote-fs-pre.target"
-        return "cloud-config.service cloud-final.service fwupd-refresh.service open-iscsi.service iscsid.service"
+        return "cloud-config.service cloud-final.service fwupd-refresh.service upki-fetch.service open-iscsi.service iscsid.service"
 
     def test_completed_local_robot_skips_wait_and_reinstall_is_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:

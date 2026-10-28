@@ -199,6 +199,8 @@ def network_wait_reason(root, run):
         "cloud-init.service", "cloud-init.target", "cloud-config.target",
         "multi-user.target", "graphical.target", "remote-fs.target",
         "fwupd-refresh.service", "apt-daily.service", "apt-daily-upgrade.service",
+        # Periodic certificate-revocation data fetch; its timer stays enabled.
+        "upki-fetch.service",
         "open-iscsi.service", "iscsid.service",
     }
     unknown = consumers - known

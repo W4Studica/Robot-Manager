@@ -164,6 +164,18 @@ run() {
   fi
 }
 
+acquire_install_lock() {
+  [ "$DRY_RUN" != 1 ] || return 0
+  command -v flock >/dev/null 2>&1 || die "flock (util-linux) is required to serialize installations"
+  local lock_file="${1:-/run/robot_manager/install.lock}"
+  install -d -m 0755 "$(dirname "$lock_file")"
+  # Keep this descriptor open until the installer and its build children exit.
+  # Never unlink the lock file: all invocations must lock the same inode.
+  exec {INSTALL_LOCK_FD}>"$lock_file"
+  flock -n "$INSTALL_LOCK_FD" \
+    || die "another installation or maintenance action is running; wait for it to finish (systemctl list-units 'w4studica-install-*')"
+}
+
 apt_install_packages() {  # apt_install_packages <reason> <package>...
   local reason="$1"; shift
   [ "$#" -gt 0 ] || return 0
@@ -855,10 +867,14 @@ install_system_profile() {
   run python3 "$RM_DIR/system/storage/configure.py"
   # Only disable competing managers for the next boot. swapoff may cause OOM
   # or stall a live robot; persistent syslog writers also stop at the reboot.
-  local unit
+  local unit unit_state
   for unit in dphys-swapfile.service zramswap.service zram-config.service rsyslog.service rsyslog.socket; do
     if systemctl list-unit-files "$unit" --no-legend 2>/dev/null | awk '{print $1}' | grep -Fxq "$unit"; then
-      run systemctl disable "$unit"
+      unit_state="$(systemctl is-enabled "$unit" 2>/dev/null || true)"
+      case "$unit_state" in
+        masked|masked-runtime) continue ;;
+        enabled|enabled-runtime|linked|linked-runtime|alias) run systemctl disable "$unit" ;;
+      esac
       run systemctl mask "$unit"
     fi
   done
@@ -1065,6 +1081,8 @@ if [ "$CHECK_RUNTIME_DEPS" = 1 ]; then
   check_deployed_wpilib_runtime
   exit 0
 fi
+
+acquire_install_lock
 
 if [ "$UNDO_NETWORK" = 1 ]; then
   undo_network
