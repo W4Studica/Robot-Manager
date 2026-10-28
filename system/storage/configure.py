@@ -2,12 +2,14 @@
 # Copyright (c) W4Studica contributors. SPDX-License-Identifier: MIT
 """Prepare the Ubuntu VMX storage profile for the next boot, without swapoff."""
 
+import json
 import os
 from pathlib import Path
 import re
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 
 GIB = 1024**3
@@ -140,6 +142,89 @@ def prepare_swap(path, run=command, size=SWAP_SIZE):
         temporary.unlink(missing_ok=True)
 
 
+def finish_provisioning(root=Path("/"), run=command):
+    """Retire cloud-init only after both it and robot networking are prepared."""
+    cloud = root / "etc/cloud"
+    marker = cloud / "cloud-init.disabled"
+    if marker.exists():
+        print("cloud-init: already disabled; preserving the existing marker")
+        return
+    network_policy = cloud / "cloud.cfg.d/99-w4studica-disable-network-config.cfg"
+    if not network_policy.is_file():
+        print("cloud-init: keeping enabled until W4Studica networking has been prepared")
+        return
+    try:
+        status = json.loads(run("cloud-init", "status", "--format", "json"))
+    except (FileNotFoundError, subprocess.CalledProcessError, ValueError):
+        print("cloud-init: completion could not be verified; keeping the existing policy")
+        return
+    if not isinstance(status, dict) or not (
+        status.get("status") == "done"
+        and status.get("extended_status", "done") == "done"
+        and not status.get("errors")
+        and not status.get("recoverable_errors")
+        and not status.get("stage")
+    ):
+        print("cloud-init: initial provisioning is not cleanly complete; keeping enabled")
+        return
+    atomic_write(marker, "# W4Studica robot provisioning is complete.\n# Remove this file to enable cloud-init on subsequent boots.\n")
+    print("cloud-init: provisioning complete; disabled for subsequent boots")
+
+
+def network_wait_reason(root, run):
+    """Return why online waiting must remain; None means a local-only robot."""
+    if not (root / "etc/cloud/cloud-init.disabled").is_file():
+        return "cloud-init is still enabled"
+    if (root / "etc/robot_manager/require-network-online").exists():
+        return "online waiting was explicitly requested"
+    _, remote = fstab_profile((root / "etc/fstab").read_text())
+    if remote:
+        return "network filesystems are configured"
+    flags = (root / "proc/cmdline").read_text().split()
+    if any(flag.startswith(("ip=", "nfsroot=", "netroot=", "root=/dev/nfs", "root=iscsi:"))
+           or flag == "rd.neednet=1" for flag in flags):
+        return "network boot parameters are configured"
+    for directory in ["etc/iscsi/nodes", "sys/class/iscsi_session"]:
+        path = root / directory
+        if path.exists() and any(path.iterdir()):
+            return "iSCSI nodes or sessions exist"
+    remote_units = run("systemctl", "show", "remote-fs.target", "--property=Requires,Wants", "--value").split()
+    if any(unit.endswith((".mount", ".automount")) for unit in remote_units):
+        return "systemd remote mounts are configured"
+    consumers = set(run("systemctl", "show", "network-online.target", "--property=WantedBy,RequiredBy", "--value").split())
+    # Cloud provisioning is now disabled. These background network jobs can
+    # retry after connectivity appears; empty iSCSI has no remote disk to attach.
+    known = {
+        "cloud-config.service", "cloud-final.service", "cloud-init-network.service",
+        "cloud-init.service", "cloud-init.target", "cloud-config.target",
+        "multi-user.target", "graphical.target", "remote-fs.target",
+        "fwupd-refresh.service", "apt-daily.service", "apt-daily-upgrade.service",
+        "open-iscsi.service", "iscsid.service",
+    }
+    unknown = consumers - known
+    if unknown:
+        return "unclassified online consumers: " + ", ".join(sorted(unknown))
+    return None
+
+
+def configure_network_wait(root=Path("/"), run=command):
+    dropin = root / "etc/systemd/system/NetworkManager-wait-online.service.d/99-w4studica-local-boot.conf"
+    try:
+        reason = network_wait_reason(root, run)
+    except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError):
+        reason = "network requirements could not be verified"
+    if reason:
+        if dropin.is_symlink():
+            raise RuntimeError(f"Refusing symlink boot configuration: {dropin}")
+        if dropin.exists():
+            dropin.unlink()
+            sync_directory(dropin.parent)
+        print("Network online wait retained: " + reason)
+    else:
+        atomic_write(dropin, (PROFILE / "local-boot.conf").read_text())
+        print("Local-only robot: NetworkManager online wait skipped at next boot")
+
+
 def configure(root=Path("/"), run=command):
     def target(name):
         return root / name.lstrip("/")
@@ -203,6 +288,12 @@ if __name__ == "__main__":
     try:
         if os.geteuid() != 0:
             raise RuntimeError("Run this helper through install.sh as root")
-        configure()
+        if sys.argv[1:] == ["--finish-provisioning"]:
+            finish_provisioning()
+            configure_network_wait()
+        elif not sys.argv[1:]:
+            configure()
+        else:
+            raise RuntimeError("Unsupported storage helper arguments")
     except (OSError, RuntimeError, subprocess.CalledProcessError) as error:
         raise SystemExit(f"storage profile: {error}") from error

@@ -29,6 +29,7 @@
 #  10. sudoers (opt-in)   lets the login user run the few sudo commands `gradlew deploy` uses, without a password
 #  11. PREEMPT_RT kernel  linux-raspi-realtime on Ubuntu >= 26.04; requires a manual reboot to activate
 #  12. storage/boot       ext4 protection, RAM journal, zram 8 GiB + disk swap 4 GiB (next boot; no OverlayFS)
+#  13. boot provisioning retires cleanly completed cloud-init; skips online waiting only for verified local-only robots
 #
 # WPILib/CameraServer/cscore/OpenCV native libraries are deployed per robot project by GradleRIO from
 # that project's pinned dependency graph. The Linux UVC camera interface is provided by the kernel (V4L2);
@@ -81,6 +82,8 @@ PREEMPT_RT kernel on Ubuntu >= 26.04. Reboot manually after installation to acti
 Also configures ext4 protection, volatile logs, 8 GiB zram and 4 GiB disk swap
 for the next boot. Existing swap is not switched off during installation.
 WPILib and Studica libraries arrive with GradleRIO deploy; no allwpilib clone is needed.
+Once initial provisioning is cleanly complete, cloud-init is disabled for future boots.
+Online waiting is skipped only when no remote storage or unknown online consumers exist.
 
 Options:
   --user NAME              login user that deploys to this robot (default: invoking user or SUDO_USER)
@@ -1011,6 +1014,7 @@ summary() {
   RT policy: $CONF_DIR/config.json realtime (new/legacy default: auto, SCHED_RR, priority 10; existing policies preserved)
   next boot: zram 8 GiB + disk swap 4 GiB; volatile logs (64 MiB); ext4 protection; no OverlayFS
   boot check: systemd-analyze critical-chain $SERVICE.service
+  boot policy: completed cloud-init retired; online wait skipped only for verified local-only setups (see above)
   Studica:   libraries supplied by GradleRIO deploy; local builds require --build-studica
   shim:      $OPT_DIR/lib/libvmx_gpio_isr_shim.so   -> LD_PRELOAD (only on kernels without /sys/class/gpio)
   lse emu:   $OPT_DIR/lib/libvmx_lse_emu.so   -> LD_AUDIT, set by robot_manager on CPUs without LSE atomics
@@ -1088,6 +1092,8 @@ install_lse_emu
 install_cpu_max
 install_system_profile
 install_network
+run python3 "$RM_DIR/system/storage/configure.py" --finish-provisioning
+run systemctl daemon-reload
 install_sudoers
 # A library problem in the deployed program is reported, but must not stop the service from being restarted.
 ( check_deployed_wpilib_runtime ) || warn "deployed libraries have unresolved dependencies (see above); robot_manager is restarted anyway"
