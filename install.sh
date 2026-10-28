@@ -57,6 +57,7 @@ SKIP_LSE_EMU=0
 SKIP_CPU_MAX=0
 UNDO_NETWORK=0
 CHECK_RUNTIME_DEPS=0
+CLEANUP_PACKAGES=0
 AP_SSID=WorldSkills
 AP_TEAM=1234
 AP_BAND=2.4
@@ -90,6 +91,7 @@ Options:
   --skip-cpu-max           do not pin the CPU at its highest frequency (robot_cpu_max.service)
   --undo-network           restore the saved pre-install network configuration and exit
   --check-runtime-deps     inspect the deployed robotCommand and GradleRIO .so files with ldd, then exit
+  --cleanup-packages       purge optional Ubuntu image tooling and exit (--dry-run previews the removal plan)
   --dry-run                print what would be done, change nothing
   -h, --help               this text
 EOF
@@ -122,12 +124,21 @@ while [ $# -gt 0 ]; do
     --skip-cpu-max) SKIP_CPU_MAX=1 ;;
     --undo-network) UNDO_NETWORK=1 ;;
     --check-runtime-deps) CHECK_RUNTIME_DEPS=1 ;;
+    --cleanup-packages) CLEANUP_PACKAGES=1 ;;
     --dry-run) DRY_RUN=1 ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; die "unknown argument: $1" ;;
   esac
   shift
 done
+
+# These modes are standalone actions; avoid silently ignoring another request.
+if [ "$((UNDO_NETWORK + CHECK_RUNTIME_DEPS + CLEANUP_PACKAGES))" -gt 1 ]; then
+  die "choose only one of --undo-network, --check-runtime-deps and --cleanup-packages"
+fi
+if [ "$CLEANUP_PACKAGES" = 1 ] && [ "$INSTALL_DEPS" != 1 ]; then
+  die "--cleanup-packages cannot be combined with --no-install-deps"
+fi
 
 run() {
   if [ "$DRY_RUN" = 1 ]; then
@@ -782,6 +793,15 @@ install_network() {
   apply_network
 }
 
+cleanup_packages() {
+  info "Optional Ubuntu image package cleanup"
+  local helper="$RM_DIR/system/package_cleanup.sh"
+  [ -f "$helper" ] || die "$helper not found"
+  local -a options=()
+  [ "$DRY_RUN" != 1 ] || options+=(--dry-run)
+  bash "$helper" "${options[@]}"
+}
+
 # Last, so robot_manager starts with every library in place: it looks for the LSE emulation library when it starts.
 restart_service() {
   info "Restarting $SERVICE"
@@ -869,6 +889,11 @@ fi
 
 if [ "$UNDO_NETWORK" = 1 ]; then
   undo_network
+  exit 0
+fi
+
+if [ "$CLEANUP_PACKAGES" = 1 ]; then
+  cleanup_packages
   exit 0
 fi
 
