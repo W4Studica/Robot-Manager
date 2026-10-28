@@ -3,11 +3,10 @@
 #
 #     ./install.sh [options]        (run as the login user; sudo is requested when needed)
 #
-# It lives in the W4Studica/Robot-Manager repo. Clone that repo and the W4Studica/allwpilib
-# repo side by side on the robot (the drivers, public headers and backend are in allwpilib/studica/):
-#     ~/Robot-Manager/install.sh
-#     ~/allwpilib/
-# or point at them with --robot-manager-dir / --allwpilib-dir.
+# Only the W4Studica/Robot-Manager checkout is required on the robot.
+# GradleRIO deploys WPILib and the matching Studica runtime from the PC release.
+# Developers can opt into local Studica builds with --build-studica and an
+# allwpilib checkout selected by --allwpilib-dir (default: a sibling checkout).
 #
 # It never opens an SSH connection or stores passwords. An SSH-launched install is handed
 # to systemd on the robot before privilege escalation can lose the SSH session context.
@@ -17,8 +16,8 @@
 #                         systemd service robot_manager (enabled and restarted); serves RioLog on TCP 1741
 #   2. RioLog discovery   Avahi publishes robot.local, the hostname used by WPILib's RioLog client
 #   3. VMX HAL SDK         installs vmxpi-hal .deb from the sibling builder's dist/ when headers/libs are missing
-#   4. studica_drivers    built with Studica's Makefile, copied into /usr/local (needs g++, make, VMXPi.h)
-#   5. Studica plugin     /opt/halsim_studica/libstudica_hardware.so for halsim_studica (needs g++ >= 11, VMXPi.h)
+#   4. studica_drivers    development only (--build-studica): built and copied into /usr/local
+#   5. Studica plugin     development only (--build-studica): built into /opt/halsim_studica
 #   6. GPIO interrupt shim /opt/robot_manager/lib/libvmx_gpio_isr_shim.so (needs gcc and make). Fixes
 #                         "RPI GPIO Interrupt Enable: PI_BAD_ISR_INIT" on kernels without GPIO sysfs
 #   7. LSE atomics emulation /opt/robot_manager/lib/libvmx_lse_emu.so (needs gcc and make). Lets WPILib's libMrcLib
@@ -51,9 +50,9 @@ DETACH_INSTALL=0
 RUNNING_DETACHED=0
 INSTALL_DEPS=1
 WITH_SUDOERS=0
-SKIP_DRIVERS=0
+SKIP_DRIVERS=1
 UPGRADE_DRIVERS=0
-SKIP_PLUGIN=0
+SKIP_PLUGIN=1
 SKIP_SHIM=0
 SKIP_LSE_EMU=0
 SKIP_CPU_MAX=0
@@ -81,20 +80,22 @@ Normal installation configures robot RT scheduling and installs the Raspberry Pi
 PREEMPT_RT kernel on Ubuntu >= 26.04. Reboot manually after installation to activate it.
 Also configures ext4 protection, volatile logs, 8 GiB zram and 4 GiB disk swap
 for the next boot. Existing swap is not switched off during installation.
+WPILib and Studica libraries arrive with GradleRIO deploy; no allwpilib clone is needed.
 
 Options:
   --user NAME              login user that deploys to this robot (default: invoking user or SUDO_USER)
   --robot-home DIR         robot_home for robot_manager (default: /home/<user>)
   --robot-manager-dir DIR  Robot-Manager checkout (default: the directory of install.sh)
   --manager-binary FILE    use a prebuilt native robot_manager instead of building with Cargo
-  --allwpilib-dir DIR      allwpilib checkout (default: ../allwpilib next to this repo)
+  --build-studica          development only: build Studica drivers/backend locally; requires allwpilib
+  --allwpilib-dir DIR      development checkout for --build-studica (default: ../allwpilib)
   --vmx-hal-deb FILE       install this vmxpi-hal arm64 package if VMX SDK headers/libraries are missing
   --sudoers                allow the login user passwordless sudo for: systemctl (robot_manager), ldconfig, sync
   --detach                 run installation as a robot-managed systemd job, even outside SSH
   --no-install-deps        do not install missing apt packages; fail with the package list instead
-  --skip-drivers           do not build/install studica_drivers
-  --upgrade-drivers        replace an already installed studica_drivers (e.g. from the vmx-hal package) with this repo's copy
-  --skip-plugin            do not build the Studica backend plugin
+  --skip-drivers           skip local driver building (already the default)
+  --upgrade-drivers        development only: build/replace installed drivers, including package-owned copies
+  --skip-plugin            skip local backend building (already the default)
   --skip-shim              do not build the GPIO interrupt shim (libvmx_gpio_isr_shim.so)
   --skip-lse-emu           do not build the LSE atomics emulation (libvmx_lse_emu.so)
   --skip-cpu-max           do not pin the CPU at its highest frequency (robot_cpu_max.service)
@@ -126,8 +127,9 @@ while [ $# -gt 0 ]; do
     --detach) DETACH_INSTALL=1 ;;
     --_run-detached) RUNNING_DETACHED=1 ;;
     --no-install-deps) INSTALL_DEPS=0 ;;
+    --build-studica) SKIP_DRIVERS=0; SKIP_PLUGIN=0 ;;
     --skip-drivers) SKIP_DRIVERS=1 ;;
-    --upgrade-drivers) UPGRADE_DRIVERS=1 ;;
+    --upgrade-drivers) UPGRADE_DRIVERS=1; SKIP_DRIVERS=0 ;;
     --skip-plugin) SKIP_PLUGIN=1 ;;
     --skip-shim) SKIP_SHIM=1 ;;
     --skip-lse-emu) SKIP_LSE_EMU=1 ;;
@@ -219,10 +221,9 @@ ensure_base_runtime_dependencies() {
 ensure_vmx_hal_sdk() {
   # Headers and libvmxpi_hal_cpp.so are not part of Ubuntu or WPILib. They come
   # from the vmxpi-hal package built from vmxpi-aarch64-hal-builder and are a
-  # hard prerequisite for building the Studica driver/plugin on the robot.
-  if have_vmx || { [ "$SKIP_PLUGIN" = 1 ] && { [ "$SKIP_DRIVERS" = 1 ] || [ -f /usr/local/lib/studica_drivers/libstudica_drivers.so ]; }; }; then
-    return 0
-  fi
+  # prerequisite for running the deployed hardware runtime and fetching its SDK,
+  # even when the Studica libraries are not built locally.
+  if have_vmx; then return 0; fi
   local package="$VMX_HAL_DEB"
   if [ -z "$package" ]; then
     local candidate
@@ -241,7 +242,7 @@ ensure_vmx_hal_sdk() {
   else
     die "VMX HAL SDK missing. Build vmxpi-hal_<version>_arm64.deb from vmxpi-aarch64-hal-builder on a PC, copy it to the builder's dist/ beside Robot-Manager, then rerun (or pass --vmx-hal-deb FILE)."
   fi
-  if [ "$DRY_RUN" != 1 ] && { [ "$SKIP_PLUGIN" != 1 ] || { [ "$SKIP_DRIVERS" != 1 ] && [ ! -f /usr/local/lib/studica_drivers/libstudica_drivers.so ]; }; }; then
+  if [ "$DRY_RUN" != 1 ]; then
     have_vmx || die "VMX HAL SDK package installed but VMXPi.h/libvmxpi_hal_cpp.so are still missing"
   fi
 }
@@ -266,22 +267,28 @@ cpp_compiler_works() {  # cpp_compiler_works <compiler> [standard]
 BUILD_CC=gcc
 BUILD_CXX=g++
 ensure_build_dependencies() {
-  local need_build=0 need_modern_cpp=0 cpp_standard=""
+  local need_build=0 need_cpp=0 need_modern_cpp=0 cpp_standard=""
   if [ "$SKIP_PLUGIN" != 1 ] || [ "$SKIP_SHIM" != 1 ] || [ "$SKIP_LSE_EMU" != 1 ]; then
     need_build=1
   fi
   if [ "$SKIP_DRIVERS" != 1 ] && { [ "$UPGRADE_DRIVERS" = 1 ] || [ ! -f /usr/local/lib/studica_drivers/libstudica_drivers.so ]; }; then
     need_build=1
+    need_cpp=1
   fi
   [ "$need_build" = 1 ] || return 0
-  [ "$SKIP_PLUGIN" = 1 ] || cpp_standard=c++20
+  if [ "$SKIP_PLUGIN" != 1 ]; then need_cpp=1; cpp_standard=c++20; fi
 
-  if ! c_compiler_works gcc || ! cpp_compiler_works g++ "$cpp_standard" || ! command -v make >/dev/null 2>&1; then
-    apt_install_packages "the C/C++ build tools" build-essential
+  if ! c_compiler_works gcc || ! command -v make >/dev/null 2>&1 \
+      || { [ "$need_cpp" = 1 ] && ! cpp_compiler_works g++ "$cpp_standard"; }; then
+    if [ "$need_cpp" = 1 ]; then
+      apt_install_packages "the C/C++ build tools" build-essential
+    else
+      apt_install_packages "the C runtime helper build tools" gcc make libc6-dev
+    fi
   fi
 
   local major=""
-  if command -v g++ >/dev/null 2>&1; then major="$(compiler_major g++)"; fi
+  if [ "$need_cpp" = 1 ] && command -v g++ >/dev/null 2>&1; then major="$(compiler_major g++)"; fi
   if [ "$SKIP_PLUGIN" != 1 ] && { [ -z "$major" ] || [ "$major" -lt 11 ]; }; then
     need_modern_cpp=1
     # Prefer the system compiler when it is already new enough; otherwise use
@@ -305,24 +312,22 @@ ensure_build_dependencies() {
 
   if [ "$DRY_RUN" != 1 ]; then
     c_compiler_works "$BUILD_CC" || die "$BUILD_CC cannot compile and link a C program; install build-essential and rerun"
-    if [ -n "$cpp_standard" ]; then
+    if [ "$need_cpp" = 1 ]; then
       cpp_compiler_works "$BUILD_CXX" "$cpp_standard" \
-        || die "$BUILD_CXX cannot compile and link a C++20 program; install build-essential and rerun"
-    else
-      cpp_compiler_works "$BUILD_CXX" \
-        || die "$BUILD_CXX cannot compile and link a C++ program; install build-essential and rerun"
+        || die "$BUILD_CXX cannot compile and link a C++ program ($cpp_standard); install build-essential and rerun"
     fi
-    command -v make >/dev/null 2>&1 || die "make is required to build Studica components"
+    command -v make >/dev/null 2>&1 || die "make is required to build runtime helpers"
     if [ "$SKIP_PLUGIN" != 1 ]; then
       major="$(compiler_major "$BUILD_CXX")"
       [ -n "$major" ] && [ "$major" -ge 11 ] \
         || die "the Studica backend requires GCC/G++ 11 or newer for C++20; found '${major:-unknown}'"
     fi
   elif [ "$need_modern_cpp" = 0 ]; then
-    info "C/C++ build tools: $(tool_version "$BUILD_CXX" --version)"
+    info "C build tools: $(tool_version "$BUILD_CC" --version); Studica C++ build enabled: $need_cpp"
   fi
   if [ "$DRY_RUN" != 1 ]; then
-    echo "  build compilers: $BUILD_CC / $BUILD_CXX; make: $(tool_version make --version)"
+    echo "  build compiler: $BUILD_CC; make: $(tool_version make --version)"
+    if [ "$need_cpp" = 1 ]; then echo "  Studica compiler: $BUILD_CXX"; fi
   fi
 }
 
@@ -377,15 +382,21 @@ validate_install_inputs() {
   if [ "$DRY_RUN" = 1 ]; then
     [ -f "$RM_DIR/Cargo.toml" ] && [ -f "$RM_DIR/Cargo.lock" ] && [ -f "$RM_DIR/robot_manager.service" ] \
       || warn "dry run: Robot-Manager sources are not present at $RM_DIR"
-    have_vmx || warn "dry run: VMX headers/libraries are not on this host; required on the robot for Studica builds"
-    [ -f "$AW_DIR/studica/src/hardware/StudicaBackend.cpp" ] \
-      || warn "dry run: Studica source is not present under $AW_DIR"
+    have_vmx || warn "dry run: VMX headers/libraries are not on this host; required on the robot for hardware access"
+    if [ "$SKIP_PLUGIN" != 1 ] || [ "$SKIP_DRIVERS" != 1 ]; then
+      [ -d "$AW_DIR/studica/drivers" ] || warn "dry run: development Studica sources are not present under $AW_DIR"
+    fi
     return 0
   fi
   [ -f "$RM_DIR/system/storage/configure.py" ] \
     || die "storage profile sources not found under $RM_DIR/system/storage"
   [ -f "$RM_DIR/Cargo.toml" ] && [ -f "$RM_DIR/Cargo.lock" ] && [ -f "$RM_DIR/robot_manager.service" ] \
     || die "Cargo.toml / Cargo.lock / robot_manager.service not found in $RM_DIR (use --robot-manager-dir)"
+  if [ "$SKIP_PLUGIN" != 1 ] || [ "$SKIP_DRIVERS" != 1 ]; then
+    [ -f "$AW_DIR/LICENSE.md" ] && [ -f "$AW_DIR/ThirdPartyNotices.txt" ] \
+      && [ -f "$AW_DIR/studica/drivers/LICENSE" ] && [ -f "$AW_DIR/studica/drivers/SOURCE.txt" ] \
+      || die "development Studica build needs the allwpilib sources and license notices (use --allwpilib-dir)"
+  fi
 
   if [ "$SKIP_PLUGIN" != 1 ]; then
     have_vmx || die "VMX SDK missing: expected /usr/local/include/vmxpi/VMXPi.h and /usr/local/lib/vmxpi/libvmxpi_hal_cpp.so. Install the vmxpi-hal SDK (for example, the package built by vmxpi-aarch64-hal-builder), then rerun or pass --skip-plugin."
@@ -649,7 +660,7 @@ install_studica_notices() {
 
 install_drivers() {
   info "studica_drivers"
-  if [ "$SKIP_DRIVERS" = 1 ]; then echo "  skipped (--skip-drivers)"; return; fi
+  if [ "$SKIP_DRIVERS" = 1 ]; then echo "  supplied by GradleRIO deploy (local build disabled)"; return; fi
   have_vmx || { [ "$DRY_RUN" = 1 ] && { warn "dry run: VMX SDK is absent on this host; skipping the local driver build preview"; return; }; die "VMX SDK not found under /usr/local; cannot build studica_drivers"; }
   # The vmx-hal package already ships (an older) libstudica_drivers. Do not overwrite files a package owns
   # unless asked. The halsim_studica plugin compiles the driver sources itself, so it does not need this library.
@@ -677,7 +688,7 @@ install_drivers() {
 
 install_plugin() {
   info "Studica backend plugin for halsim_studica"
-  if [ "$SKIP_PLUGIN" = 1 ]; then echo "  skipped (--skip-plugin)"; return; fi
+  if [ "$SKIP_PLUGIN" = 1 ]; then echo "  supplied by GradleRIO deploy (local build disabled)"; return; fi
   have_vmx || { [ "$DRY_RUN" = 1 ] && { warn "dry run: VMX SDK is absent on this host; skipping the local plugin build preview"; return; }; die "VMX SDK not found under /usr/local; cannot build the Studica backend plugin"; }
   local major; major="$(gpp_major)"
   if [ "$DRY_RUN" != 1 ]; then
@@ -981,10 +992,10 @@ summary() {
   RT policy: $CONF_DIR/config.json realtime (new/legacy default: auto, SCHED_RR, priority 10; existing policies preserved)
   next boot: zram 8 GiB + disk swap 4 GiB; volatile logs (64 MiB); ext4 protection; no OverlayFS
   boot check: systemd-analyze critical-chain $SERVICE.service
-  plugin:    $PLUGIN_DIR/libstudica_hardware.so   (hardware plugin; no environment override)
+  Studica:   libraries supplied by GradleRIO deploy; local builds require --build-studica
   shim:      $OPT_DIR/lib/libvmx_gpio_isr_shim.so   -> LD_PRELOAD (only on kernels without /sys/class/gpio)
   lse emu:   $OPT_DIR/lib/libvmx_lse_emu.so   -> LD_AUDIT, set by robot_manager on CPUs without LSE atomics
-  build:     $BUILD_CC / $BUILD_CXX and make (missing packages installed by apt; --no-install-deps disables this)
+  build:     C helpers / Rust manager (missing packages installed by apt; --no-install-deps disables this)
   cpu:       systemctl status robot_cpu_max      (governor performance, at every boot)
   network:   setupHotspot WorldSkills 1234 2.4 password; toggleNetMode ap; saved Wi-Fi profiles are deleted
   runtime:   ./install.sh --check-runtime-deps --user $LOGIN_USER (after GradleRIO deploy)
