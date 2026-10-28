@@ -608,6 +608,8 @@ install_robot_manager() {
     "$binary" network-backup --help >/dev/null || die "robot_manager binary is missing Rust network backup"
   fi
   run install -d -m 0755 "$OPT_DIR" "$CONF_DIR"
+  run install -d -m 0755 "$OPT_DIR/licenses"
+  run install -m 0644 "$RM_DIR/LICENSE" "$RM_DIR/ThirdPartyNotices.txt" "$OPT_DIR/licenses/"
   # Replace atomically: an already running Rust service may still hold the old executable open.
   run install -m 0755 "$binary" "$OPT_DIR/robot_manager.new"
   run mv -f "$OPT_DIR/robot_manager.new" "$OPT_DIR/robot_manager"
@@ -631,6 +633,13 @@ EOF
   run rm -f "$OPT_DIR/robot_manager.py"
   run systemctl daemon-reload
   run systemctl enable "$SERVICE"
+}
+
+install_studica_notices() {
+  if [ "$SKIP_DRIVERS" = 1 ] && [ "$SKIP_PLUGIN" = 1 ]; then return; fi
+  run install -d -m 0755 "$OPT_DIR/licenses/studica"
+  run install -m 0644 "$AW_DIR/LICENSE.md" "$AW_DIR/ThirdPartyNotices.txt" "$OPT_DIR/licenses/studica/"
+  run install -m 0644 "$AW_DIR/studica/drivers/LICENSE" "$AW_DIR/studica/drivers/SOURCE.txt" "$OPT_DIR/licenses/studica/"
 }
 
 install_drivers() {
@@ -1004,6 +1013,7 @@ ensure_rust_build_dependencies
 install_robot_manager
 install_drivers
 install_plugin
+install_studica_notices
 install_shim
 install_lse_emu
 install_cpu_max

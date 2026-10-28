@@ -4,4 +4,4 @@ Used by [W4Studica](https://github.com/W4Studica) on Studica VMX-pi (Raspberry P
 
 ## License
 
-This repository does not currently declare a project license.
+[MIT](LICENSE). Dependency notices: [ThirdPartyNotices.txt](ThirdPartyNotices.txt).
