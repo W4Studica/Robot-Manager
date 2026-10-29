@@ -85,10 +85,14 @@ fn run() -> io::Result<()> {
         "PREEMPT_RT kernel: {kernel_state}; robot RT mode: {:?}, requested policy: {}/{}; userspace scheduling does not enable PREEMPT_RT",
         config.realtime.mode, requested.name(), requested.priority
     ));
-    let has_lse = std::fs::read_to_string("/proc/cpuinfo")
+    let has_runtime_instructions = std::fs::read_to_string("/proc/cpuinfo")
         .ok()
-        .and_then(|text| config::cpu_has_lse(&text));
-    let env = config.environment(kernel.trim(), std::env::vars().collect(), has_lse)?;
+        .and_then(|text| config::cpu_supports_runtime_instructions(&text));
+    let env = config.environment(
+        kernel.trim(),
+        std::env::vars().collect(),
+        has_runtime_instructions,
+    )?;
     let mut server = if config.riolog_enabled {
         match RioLogServer::start(config.riolog_port, config.riolog_history) {
             Ok(server) => Some(server),

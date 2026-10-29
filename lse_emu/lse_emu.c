@@ -1,5 +1,5 @@
 /*
- * lse_emu - LD_PRELOAD library that emulates ARMv8.1 LSE atomic instructions on CPUs that lack them.
+ * lse_emu - LD_AUDIT library that emulates LSE atomics and RCpc loads on older ARM64 CPUs.
  *
  * WHY: libMrcLib.so (WPILib's Driver Station / robot communication library, binary only) is built with the
  * SystemCore toolchain and uses LSE instructions (swp, ldadd, cas, ...) inline, but is published under the name
@@ -18,11 +18,12 @@
  * program needs, and the first LSE instruction in one of their constructors (libMrcLib has libuv inside) would crash
  * before the handler exists. An audit library is loaded and initialised before everything else.
  *
- * Does nothing on a CPU that has LSE (HWCAP_ATOMICS), so it can stay in LD_AUDIT everywhere. Any SIGILL that is not
+ * Does nothing on a CPU that has both LSE and RCpc, so it can stay in LD_AUDIT everywhere. Any SIGILL that is not
  * one of the supported instructions goes to the previous handler or, if there is none, crashes as usual.
  *
  * Supported: LD<op>[A][L][B|H], ST<op>[L][B|H] (op = add, clr, eor, set, smax, smin, umax, umin), SWP[A][L][B|H],
- * CAS[A][L][B|H]. Not supported (SIGILL stays a crash): CASP, LDAPR and anything else.
+ * CAS[A][L][B|H], and no-offset LDAPR/LDAPRB/LDAPRH. Not supported (SIGILL stays a crash): CASP,
+ * post-index LDAPR, LDAPUR and anything else.
  *
  * Build for plain ARMv8.0 (no outline atomics, no LSE in this file): see the Makefile.
  *
@@ -40,6 +41,9 @@
 
 #ifndef HWCAP_ATOMICS
 #define HWCAP_ATOMICS (1UL << 8)
+#endif
+#ifndef HWCAP_ILRCPC
+#define HWCAP_ILRCPC (1UL << 15)
 #endif
 
 static struct sigaction g_old;
@@ -105,6 +109,20 @@ static int emulate(ucontext_t* uc, uint32_t insn) {
   void* addr = (void*)get_base(uc, rn);
   uint64_t result;
 
+  if ((insn & 0x3FFFFC00u) == 0x38BFC000u) {
+    /* No-offset LDAPR[B|H]: use LDAR's stronger acquire ordering on ARMv8.0.
+     * Inspired by agy-termux-lse's LDAPR -> LDAR binary patch; no binary is modified here.
+     * Match all fixed bits so unrelated load encodings still raise SIGILL. */
+    switch (size) {
+      case 0: result = __atomic_load_n((uint8_t*)addr, __ATOMIC_ACQUIRE); break;
+      case 1: result = __atomic_load_n((uint16_t*)addr, __ATOMIC_ACQUIRE); break;
+      case 2: result = __atomic_load_n((uint32_t*)addr, __ATOMIC_ACQUIRE); break;
+      default: result = __atomic_load_n((uint64_t*)addr, __ATOMIC_ACQUIRE); break;
+    }
+    set_x(uc, rt, result);
+    return 1;
+  }
+
   if ((insn & 0x3F200C00u) == 0x38200000u) {
     /* LD<op>, ST<op>, SWP: size 111 0 00 A R 1 Rs o3 opc 00 Rn Rt */
     const unsigned o3 = (insn >> 15) & 1;
@@ -145,6 +163,7 @@ static int emulate(ucontext_t* uc, uint32_t insn) {
 }
 
 static void handler(int sig, siginfo_t* info, void* context) {
+  const int saved_errno = errno;
   ucontext_t* uc = (ucontext_t*)context;
   const uint64_t pc = uc->uc_mcontext.pc;
   uint32_t insn;
@@ -152,6 +171,7 @@ static void handler(int sig, siginfo_t* info, void* context) {
   if (emulate(uc, insn)) {
     __atomic_fetch_add(&g_count, 1, __ATOMIC_RELAXED);
     uc->uc_mcontext.pc = pc + 4;
+    errno = saved_errno;
     return;
   }
   /* Not ours: hand over to whoever was there before, or crash the normal way. */
@@ -183,7 +203,8 @@ static void lse_emu_init(void) {
   if (g_installed) {
     return;
   }
-  if (getauxval(AT_HWCAP) & HWCAP_ATOMICS) {
+  const unsigned long required = HWCAP_ATOMICS | HWCAP_ILRCPC;
+  if ((getauxval(AT_HWCAP) & required) == required) {
     return; /* the CPU runs these instructions itself */
   }
   struct sigaction sa;

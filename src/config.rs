@@ -154,11 +154,11 @@ impl Config {
         &self,
         kernel: &str,
         mut base: HashMap<String, String>,
-        has_lse: Option<bool>,
+        has_runtime_instructions: Option<bool>,
     ) -> io::Result<HashMap<String, String>> {
         extend_env(&mut base, &self.env);
         let mode = self.lse_emulation.to_lowercase();
-        if mode != "off" && (mode == "on" || has_lse == Some(false)) {
+        if mode != "off" && (mode == "on" || has_runtime_instructions == Some(false)) {
             if !self.lse_emulation_library.is_file() {
                 crate::log("WARNING", format_args!("LSE emulation library {} is missing; programs using libMrcLib may fail with SIGILL", self.lse_emulation_library.display()));
             } else if base.get("LD_AUDIT").is_some_and(|s| !s.is_empty()) {
@@ -211,9 +211,15 @@ fn validate_env(env: &HashMap<String, Value>) -> io::Result<()> {
 fn extend_env(target: &mut HashMap<String, String>, values: &HashMap<String, Value>) {
     target.extend(values.iter().map(|(k, v)| (k.clone(), env_value(v))));
 }
-pub fn cpu_has_lse(text: &str) -> Option<bool> {
-    text.lines().find_map(|line| {
-        let (name, flags) = line.split_once(':')?;
-        (name.trim() == "Features").then(|| flags.split_whitespace().any(|f| f == "atomics"))
-    })
+/// Every listed ARM core must support both LSE and RCpc to skip the compatibility library.
+pub fn cpu_supports_runtime_instructions(text: &str) -> Option<bool> {
+    text.lines()
+        .filter_map(|line| {
+            let (name, flags) = line.split_once(':')?;
+            (name.trim() == "Features").then(|| {
+                let has = |feature| flags.split_whitespace().any(|f| f == feature);
+                has("atomics") && has("ilrcpc")
+            })
+        })
+        .reduce(|all, supported| all && supported)
 }

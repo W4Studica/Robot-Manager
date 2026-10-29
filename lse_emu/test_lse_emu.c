@@ -1,7 +1,8 @@
 /* Tests for lse_emu: every LSE instruction form it supports, checked against a plain C model, then a multi-thread
  * atomicity test and a "foreign SIGILL still crashes" test. GENERATED once from a script, edit by hand afterwards.
- * Runs on any ARMv8 Linux: with LSE hardware the instructions execute natively (emulation inactive). */
+ * Runs on ARMv8 Linux: with LSE and RCpc hardware the instructions execute natively (emulation inactive). */
 #define _GNU_SOURCE
+#include <errno.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
@@ -1517,18 +1518,47 @@ static void test_foreign_sigill(void) {
   CHECK(WIFSIGNALED(status) && WTERMSIG(status) == SIGILL, "a plain illegal instruction should still kill the process with SIGILL (status %d)", status);
 }
 
+/* RCpc loads must zero-extend narrow values and preserve errno and memory. */
+static void test_rcpc_loads(void) {
+  const uint64_t patterns[] = {0, UINT64_MAX, UINT64_C(0xFEDCBA9876543281)};
+  for (unsigned i = 0; i < sizeof patterns / sizeof patterns[0]; ++i) {
+    uint64_t value = patterns[i], result;
+    errno = EDOM;
+#define CHECK_LOAD(OP, REG, MASK)                                                                                     \
+    result = UINT64_MAX;                                                                                              \
+    __asm__ volatile(".arch_extension rcpc\n\t" OP " " REG "[r], [%[p]]"                                        \
+                     : [r] "=r"(result) : [p] "r"(&value) : "memory");                                             \
+    CHECK(result == (value & (MASK)), OP " result/zero extension is wrong");                                        \
+    CHECK(errno == EDOM, OP " changed errno");                                                                      \
+    CHECK(value == patterns[i], OP " changed memory")
+    CHECK_LOAD("ldaprb", "%w", UINT8_MAX);
+    CHECK_LOAD("ldaprh", "%w", UINT16_MAX);
+    CHECK_LOAD("ldapr", "%w", UINT32_MAX);
+    CHECK_LOAD("ldapr", "%x", UINT64_MAX);
+#undef CHECK_LOAD
+    /* Rn == Rt: the address must be captured before replacing the register. */
+    result = (uintptr_t)&value;
+    __asm__ volatile(".arch_extension rcpc\n\tldapr %x[r], [%x[r]]" : [r] "+r"(result) : : "memory");
+    CHECK(result == value, "ldapr with Rn == Rt is wrong");
+    __asm__ volatile(".arch_extension rcpc\n\tldapr xzr, [%[p]]" : : [p] "r"(&value) : "memory");
+    CHECK(errno == EDOM, "ldapr discard changed errno");
+  }
+}
+
 int main(void) {
   /* The emulation lives in the audit namespace, invisible to the program: whether it is needed follows from the CPU. */
-  const int active = !(getauxval(AT_HWCAP) & (1UL << 8));
-  printf("this CPU %s LSE%s\n", active ? "has no" : "has", active ? ": the instructions below are emulated (LD_AUDIT)" : ": they run natively");
+  const unsigned long required = (1UL << 8) | (1UL << 15);
+  const int active = (getauxval(AT_HWCAP) & required) != required;
+  printf("LSE/RCpc compatibility handler %s\n", active ? "needed (LD_AUDIT)" : "inactive (native instructions)");
   CHECK(fake_mrclib_constructor_ran(), "a library constructor that executes LSE before main() did not run");
   test_forms();
+  test_rcpc_loads();
   test_threads();
   if (active) test_foreign_sigill();
   if (failures) {
     printf("%d FAILURE(S)\n", failures);
     return 1;
   }
-  printf("all lse_emu tests passed (%zu forms)\n", sizeof kAmo / sizeof kAmo[0] + sizeof kCas / sizeof kCas[0]);
+  printf("all lse_emu tests passed (%zu LSE forms and RCpc loads)\n", sizeof kAmo / sizeof kAmo[0] + sizeof kCas / sizeof kCas[0]);
   return 0;
 }

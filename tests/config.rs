@@ -1,4 +1,4 @@
-use robot_manager::config::{cpu_has_lse, Config};
+use robot_manager::config::{cpu_supports_runtime_instructions, Config};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
@@ -82,11 +82,33 @@ fn invalid_env_and_regex_fail_before_starting_a_robot() {
 #[test]
 fn cpu_features_are_not_guessed_on_other_architectures() {
     assert_eq!(
-        cpu_has_lse("Features : fp asimd atomics crc32\n"),
+        cpu_supports_runtime_instructions("Features : fp asimd atomics ilrcpc crc32\n"),
         Some(true)
     );
-    assert_eq!(cpu_has_lse("Features : fp asimd crc32\n"), Some(false));
-    assert_eq!(cpu_has_lse("flags : sse sse2\n"), None);
+    assert_eq!(
+        cpu_supports_runtime_instructions("Features : fp asimd crc32\n"),
+        Some(false)
+    );
+    assert_eq!(
+        cpu_supports_runtime_instructions("flags : sse sse2\n"),
+        None
+    );
+    assert_eq!(
+        cpu_supports_runtime_instructions("Features : fp asimd atomics\n"),
+        Some(false)
+    );
+    assert_eq!(
+        cpu_supports_runtime_instructions("Features : fp asimd ilrcpc\n"),
+        Some(false)
+    );
+    assert_eq!(
+        cpu_supports_runtime_instructions("Features : atomics ilrcpc\nFeatures : atomics\n"),
+        Some(false)
+    );
+    assert_eq!(
+        cpu_supports_runtime_instructions("Features : atomics ilrcpc\nFeatures : atomics ilrcpc\n"),
+        Some(true)
+    );
 }
 #[test]
 fn lse_audit_only_loads_when_needed_and_never_overrides_an_existing_value() {
