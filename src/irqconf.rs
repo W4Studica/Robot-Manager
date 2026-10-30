@@ -1,11 +1,11 @@
 //! VMX network IRQ affinity and CPU isolation.
-//! Pins network and I/O interrupts to CPU 0 and 1 (mask 0x3),
-//! leaving CPU 2 and 3 unburdened for the robot's real-time control loop.
+//! Pins network and I/O interrupts to CPU 3 (mask 0x8),
+//! leaving CPU 0, 1, and 2 dedicated to the robot's real-time control loop.
 use std::fs;
 use std::io;
 use std::path::Path;
 
-pub const NETWORK_CPU_MASK: &str = "3"; // CPU 0 and 1 (binary 0011)
+pub const NETWORK_CPU_MASK: &str = "8"; // CPU 3 (binary 1000)
 
 #[derive(Clone, Debug)]
 pub struct PinnedIrq {
@@ -92,7 +92,7 @@ pub fn dispatch(args: &[String]) -> Option<io::Result<()>> {
         let pinned = configure_irq_affinity(dry_run)?;
         if !dry_run {
             println!(
-                "Configured network IRQ affinity to CPU 0,1 (mask 0x3) for {} interrupts; CPU 2,3 reserved for RT control",
+                "Configured network IRQ affinity to CPU 3 (mask 0x8) for {} interrupts; CPU 0,1,2 reserved for robot program",
                 pinned.len()
             );
             for p in pinned {

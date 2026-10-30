@@ -275,9 +275,10 @@ fn child_process_affinity_is_reset_to_all_cores() {
     if out.exists() {
         let count: usize = fs::read_to_string(&out).unwrap().trim().parse().unwrap_or(0);
         let num_cpus = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) } as usize;
+        let expected = if num_cpus > 1 { num_cpus - 1 } else { 1 };
         assert_eq!(
-            count, num_cpus,
-            "child should have affinity to all {num_cpus} CPUs, not just pinned core"
+            count, expected,
+            "child should have affinity to {expected} CPUs, excluding supervisor CPU 3"
         );
     }
 }
