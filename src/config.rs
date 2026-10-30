@@ -22,6 +22,8 @@ pub struct Profile {
 pub struct Config {
     pub robot_home: PathBuf,
     #[serde(default)]
+    pub robot_user: Option<String>,
+    #[serde(default)]
     pub realtime: crate::realtime::Settings,
     pub robot_command: Option<PathBuf>,
     #[serde(default)]

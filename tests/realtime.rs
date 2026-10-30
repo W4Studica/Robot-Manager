@@ -60,6 +60,7 @@ fn launch(home: &Path, settings: Settings) -> io::Result<ChildGroup> {
         Journal::with_writer(Box::new(io::sink()))?,
         None,
         settings,
+        None,
     )
 }
 fn finish(group: &mut ChildGroup) {
@@ -191,6 +192,7 @@ fn invalid_priority_and_missing_program_fail_before_execution() {
             mode: Mode::Off,
             ..Settings::default()
         },
+        None,
     )
     .unwrap();
     let deadline = Instant::now() + Duration::from_secs(3);

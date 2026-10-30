@@ -66,6 +66,24 @@ pub struct ChildGroup {
     cleaned: bool,
     scheduling: crate::realtime::Report,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Credentials {
+    pub uid: u32,
+    pub gid: u32,
+}
+
+pub fn resolve_user(name: &str) -> io::Result<Credentials> {
+    let cname = std::ffi::CString::new(name).map_err(io::Error::other)?;
+    // SAFETY: getpwnam searches the system user database.
+    let pwd = unsafe { libc::getpwnam(cname.as_ptr()) };
+    if pwd.is_null() {
+        return Err(io::Error::other(format!("user not found: {name}")));
+    }
+    let (uid, gid) = unsafe { ((*pwd).pw_uid, (*pwd).pw_gid) };
+    Ok(Credentials { uid, gid })
+}
+
 impl ChildGroup {
     pub fn spawn(
         command_file: &Path,
@@ -74,7 +92,12 @@ impl ChildGroup {
         journal: Journal,
         console: Option<Arc<dyn LineSink>>,
         realtime: crate::realtime::Settings,
+        robot_user: Option<&str>,
     ) -> io::Result<Self> {
+        let creds = match robot_user {
+            Some(name) if name != "root" => Some(resolve_user(name)?),
+            _ => None,
+        };
         let scheduling = realtime.prepare()?;
         let (mut scheduling_read, scheduling_write) = output_pipe()?;
         let report_fd = scheduling_write.as_raw_fd();
@@ -95,6 +118,21 @@ impl ChildGroup {
             command.pre_exec(move || {
                 if libc::setsid() < 0 {
                     return Err(io::Error::last_os_error());
+                }
+                if let Some(cred) = creds {
+                    if libc::setgid(cred.gid) < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    libc::prctl(libc::PR_SET_KEEPCAPS, 1, 0, 0, 0);
+                    if libc::setuid(cred.uid) < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    const PR_CAP_AMBIENT: i32 = 47;
+                    const PR_CAP_AMBIENT_RAISE: u64 = 2;
+                    const CAP_SYS_RAWIO: u64 = 17;
+                    const CAP_SYS_NICE: u64 = 23;
+                    libc::prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_RAISE, CAP_SYS_RAWIO, 0, 0);
+                    libc::prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_RAISE, CAP_SYS_NICE, 0, 0);
                 }
                 scheduling.apply_and_report(report_fd)
             });

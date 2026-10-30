@@ -17,6 +17,7 @@ pub struct Policy {
     pub stop_grace: Duration,
     pub stop_signals: Vec<i32>,
     pub realtime: crate::realtime::Settings,
+    pub robot_user: Option<String>,
 }
 impl Default for Policy {
     fn default() -> Self {
@@ -28,6 +29,7 @@ impl Default for Policy {
             stop_grace: Duration::from_secs(5),
             stop_signals: vec![libc::SIGINT, libc::SIGTERM],
             realtime: crate::realtime::Settings::default(),
+            robot_user: None,
         }
     }
 }
@@ -70,6 +72,7 @@ impl Manager {
                 self.journal.clone(),
                 self.console.clone(),
                 self.policy.realtime,
+                self.policy.robot_user.as_deref(),
             ) {
                 Ok(group) => group,
                 Err(error) => {

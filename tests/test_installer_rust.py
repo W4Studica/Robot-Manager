@@ -89,5 +89,19 @@ fi
             result = subprocess.run(["bash", str(script)], env=os.environ, capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("[dry-run] reboot", result.stdout)
+
+    def test_configurable_accounts_in_installer(self):
+        result = subprocess.run(
+            ["bash", str(ROOT / "install.sh"), "--dry-run", "--admin-user", "myadm", "--robot-user", "mybot", "--robot-home", "/home/mybot", "--purge-user", "oldacc"],
+            capture_output=True, text=True, timeout=10, env=os.environ,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('"robot_user": "mybot"', result.stdout)
+        self.assertIn('"robot_home": "/home/mybot"', result.stdout)
+        self.assertIn("accounts:  admin = myadm, robot = mybot", result.stdout)
+        self.assertIn("[dry-run] pkill -9 -u oldacc", result.stdout)
+        self.assertIn("[dry-run] userdel -r oldacc", result.stdout)
+        self.assertIn("[dry-run] reboot", result.stdout)
+
 if __name__ == "__main__":
     unittest.main()

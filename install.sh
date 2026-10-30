@@ -68,6 +68,12 @@ AP_TEAM=1234
 AP_BAND=2.4
 AP_PASSWORD=password
 VMX_HAL_DEB="${VMX_HAL_DEB:-}"
+ADMIN_USER="${ADMIN_USER:-admin}"
+ROBOT_USER="${ROBOT_USER:-lvuser}"
+ADMIN_PASSWORD="${ADMIN_PASSWORD:-password}"
+ROBOT_PASSWORD="${ROBOT_PASSWORD:-password}"
+PURGE_OLD_USER="${PURGE_OLD_USER:-}"
+CLONE_REPO="${CLONE_REPO:-}"
 ROBOT_HOME=""
 LOGIN_USER=""
 # Defaults: this repo is where install.sh is; allwpilib is a sibling checkout (or inside this directory).
@@ -87,8 +93,13 @@ Once initial provisioning is cleanly complete, cloud-init is disabled for future
 Online waiting is skipped only when no remote storage or unknown online consumers exist.
 
 Options:
-  --user NAME              login user that deploys to this robot (default: invoking user or SUDO_USER)
-  --robot-home DIR         robot_home for robot_manager (default: /home/<user>)
+  --admin-user NAME        administrator user with sudo rights (default: admin)
+  --robot-user NAME        unprivileged robot runner user (default: lvuser)
+  --purge-user NAME        purge legacy user account right before reboot
+  --purge-old-user         purge current non-admin sudo user before reboot
+  --clone-repo [URL]       clone the repository to /tmp/robot_manager and install
+  --user NAME              login user that deploys to this robot (default: admin)
+  --robot-home DIR         robot_home for robot_manager (default: /home/<robot-user>)
   --robot-manager-dir DIR  Robot-Manager checkout (default: the directory of install.sh)
   --manager-binary FILE    use a prebuilt native robot_manager instead of building with Cargo
   --build-studica          development only: build Studica drivers/backend locally; requires allwpilib
@@ -122,7 +133,18 @@ ORIG_ARGS=("$@")
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --user) [ $# -ge 2 ] || die "--user needs a value"; LOGIN_USER="$2"; shift ;;
+    --admin-user) [ $# -ge 2 ] || die "--admin-user needs a value"; ADMIN_USER="$2"; LOGIN_USER="$2"; shift ;;
+    --robot-user) [ $# -ge 2 ] || die "--robot-user needs a value"; ROBOT_USER="$2"; shift ;;
+    --user) [ $# -ge 2 ] || die "--user needs a value"; LOGIN_USER="$2"; ADMIN_USER="$2"; shift ;;
+    --purge-user) [ $# -ge 2 ] || die "--purge-user needs a value"; PURGE_OLD_USER="$2"; shift ;;
+    --purge-old-user) PURGE_OLD_USER=1 ;;
+    --clone-repo)
+      if [ $# -ge 2 ] && [[ "$2" != --* ]]; then
+        CLONE_REPO="$2"; shift
+      else
+        CLONE_REPO="https://github.com/W4Studica/Robot-Manager.git"
+      fi
+      ;;
     --robot-home) [ $# -ge 2 ] || die "--robot-home needs a value"; ROBOT_HOME="$2"; shift ;;
     --robot-manager-dir) [ $# -ge 2 ] || die "--robot-manager-dir needs a value"; RM_DIR="$2"; shift ;;
     --manager-binary) [ $# -ge 2 ] || die "--manager-binary needs a value"; MANAGER_BINARY="$2"; shift ;;
@@ -151,6 +173,15 @@ while [ $# -gt 0 ]; do
   shift
 done
 
+if [ -n "$CLONE_REPO" ]; then
+  info "Cloning $CLONE_REPO to /tmp/robot_manager"
+  rm -rf /tmp/robot_manager
+  git clone "$CLONE_REPO" /tmp/robot_manager
+  cd /tmp/robot_manager
+  exec ./install.sh --admin-user "$ADMIN_USER" --robot-user "$ROBOT_USER" \
+    ${ROBOT_HOME:+--robot-home "$ROBOT_HOME"} \
+    ${PURGE_OLD_USER:+--purge-user "$PURGE_OLD_USER"}
+fi
 # These modes are standalone actions; avoid silently ignoring another request.
 if [ "$((UNDO_NETWORK + CHECK_RUNTIME_DEPS + CLEANUP_PACKAGES))" -gt 1 ]; then
   die "choose only one of --undo-network, --check-runtime-deps and --cleanup-packages"
@@ -446,6 +477,46 @@ validate_install_inputs() {
   fi
 }
 
+setup_accounts() {
+  info "Configuring accounts: admin='$ADMIN_USER', robot='$ROBOT_USER'"
+  local admin_groups="sudo,adm,dialout,plugdev,netdev,kmem"
+  local robot_groups="dialout,i2c,spi,kmem"
+
+  if [ "$DRY_RUN" = 1 ]; then
+    echo "  [dry-run] configure admin account '$ADMIN_USER' (groups: $admin_groups)"
+    echo "  [dry-run] configure robot account '$ROBOT_USER' (home: $ROBOT_HOME, groups: $robot_groups)"
+    return 0
+  fi
+
+  # 1. Admin account setup
+  if id "$ADMIN_USER" >/dev/null 2>&1; then
+    run usermod -a -G "$admin_groups" "$ADMIN_USER" 2>/dev/null || true
+  else
+    info "Creating admin user '$ADMIN_USER'"
+    run useradd -m -s /bin/bash -U -G "$admin_groups" "$ADMIN_USER"
+    echo "$ADMIN_USER:$ADMIN_PASSWORD" | chpasswd
+  fi
+
+  # Copy SSH authorized_keys from current sudo user if present
+  local old_user="${SUDO_USER:-}"
+  if [ -n "$old_user" ] && [ "$old_user" != "$ADMIN_USER" ] && [ -f "/home/$old_user/.ssh/authorized_keys" ]; then
+    run install -d -m 0700 "/home/$ADMIN_USER/.ssh"
+    run cp -f "/home/$old_user/.ssh/authorized_keys" "/home/$ADMIN_USER/.ssh/authorized_keys"
+    run chown -R "$ADMIN_USER:$ADMIN_USER" "/home/$ADMIN_USER/.ssh" 2>/dev/null || true
+    run chmod 0600 "/home/$ADMIN_USER/.ssh/authorized_keys"
+  fi
+
+  # 2. Robot user setup
+  if id "$ROBOT_USER" >/dev/null 2>&1; then
+    run usermod -a -G "$robot_groups" "$ROBOT_USER" 2>/dev/null || true
+  else
+    info "Creating robot user '$ROBOT_USER' (home: $ROBOT_HOME)"
+    run useradd -m -d "$ROBOT_HOME" -s /bin/bash -U -G "$robot_groups" "$ROBOT_USER"
+    echo "$ROBOT_USER:$ROBOT_PASSWORD" | chpasswd
+  fi
+  run install -d -m 0755 "$ROBOT_HOME"
+  run chown "$ROBOT_USER:$ROBOT_USER" "$ROBOT_HOME" 2>/dev/null || true
+}
 verify_shared_library() {  # verify_shared_library <path> [extra-library-path]
   local path="$1" search_path="${2:-/usr/local/lib/vmxpi}" result
   [ -f "$path" ] || die "expected shared library was not built: $path"
@@ -677,6 +748,7 @@ install_robot_manager() {
     write_file "$CONF_DIR/config.json" 0644 <<EOF
 {
   "robot_home": "$ROBOT_HOME",
+  "robot_user": "$ROBOT_USER",
   "realtime": { "mode": "auto", "policy": "rr", "priority": 10 },
   "env": {},
   "profiles": []
@@ -1011,14 +1083,19 @@ restart_service() {
 }
 
 install_sudoers() {
-  info "sudoers for '$LOGIN_USER'"
+  local target_user="${ADMIN_USER:-$LOGIN_USER}"
+  info "sudoers for '$target_user'"
   if [ "$WITH_SUDOERS" != 1 ]; then echo "  skipped (pass --sudoers to allow passwordless deploy)"; return; fi
   local systemctl_bin ldconfig_bin sync_bin
   systemctl_bin="$(command -v systemctl)"; ldconfig_bin="$(command -v ldconfig)"; sync_bin="$(command -v sync)"
   local tmp; tmp="$(mktemp)"
+  local sudo_users="$target_user"
+  if [ -n "$LOGIN_USER" ] && [ "$LOGIN_USER" != "$target_user" ]; then
+    sudo_users="$target_user, $LOGIN_USER"
+  fi
   cat > "$tmp" <<EOF
 # Installed by W4Studica install.sh: what 'gradlew deploy' runs through sudo for the VmxPi target.
-$LOGIN_USER ALL=(root) NOPASSWD: $systemctl_bin stop $SERVICE, $systemctl_bin start $SERVICE, $systemctl_bin restart $SERVICE, $systemctl_bin enable $SERVICE, $systemctl_bin stop robot, $systemctl_bin start robot, $systemctl_bin restart robot, $systemctl_bin enable robot, $ldconfig_bin, $sync_bin
+$sudo_users ALL=(root) NOPASSWD: $systemctl_bin stop $SERVICE, $systemctl_bin start $SERVICE, $systemctl_bin restart $SERVICE, $systemctl_bin enable $SERVICE, $systemctl_bin stop robot, $systemctl_bin start robot, $systemctl_bin restart robot, $systemctl_bin enable robot, $ldconfig_bin, $sync_bin
 EOF
   if [ "$DRY_RUN" = 1 ]; then
     echo "[dry-run] write /etc/sudoers.d/w4studica-deploy (mode 0440):"; sed 's/^/[dry-run]   /' "$tmp"; rm -f "$tmp"; return
@@ -1038,6 +1115,7 @@ summary() {
 
 ==> Done$( [ "$DRY_RUN" = 1 ] && echo " (dry run: nothing was changed)" )
   service:   systemctl status robot (or $SERVICE)      logs: journalctl -u robot -f
+  accounts:  admin = $ADMIN_USER, robot = $ROBOT_USER
   config:    $CONF_DIR/config.json   (robot_home = $ROBOT_HOME)
   RT kernel: $RT_KERNEL_STATUS
   RT policy: $CONF_DIR/config.json realtime (new/legacy default: auto, SCHED_RR, priority 10; existing policies preserved)
@@ -1055,8 +1133,20 @@ WPILib/OpenCV shared libraries are deployed per project by GradleRIO; this insta
 EOF
 }
 
-[ -n "$LOGIN_USER" ] || LOGIN_USER="${SUDO_USER:-$(id -un)}"
-[ -n "$ROBOT_HOME" ] || ROBOT_HOME="/home/$LOGIN_USER"
+[ -n "$LOGIN_USER" ] || LOGIN_USER="${ADMIN_USER:-${SUDO_USER:-$(id -un)}}"
+[ -n "$ADMIN_USER" ] || ADMIN_USER="$LOGIN_USER"
+[ -n "$ROBOT_USER" ] || ROBOT_USER="lvuser"
+[ -n "$ROBOT_HOME" ] || ROBOT_HOME="/home/$ROBOT_USER"
+if [ "$PURGE_OLD_USER" = 1 ]; then
+  prev_candidate="${SUDO_USER:-}"
+  if [ -n "$prev_candidate" ] && [ "$prev_candidate" != "$ADMIN_USER" ] && [ "$prev_candidate" != "$ROBOT_USER" ] && [ "$prev_candidate" != "root" ]; then
+    PURGE_OLD_USER="$prev_candidate"
+  elif id ubuntu >/dev/null 2>&1 && [ "$ADMIN_USER" != "ubuntu" ] && [ "$ROBOT_USER" != "ubuntu" ]; then
+    PURGE_OLD_USER="ubuntu"
+  else
+    PURGE_OLD_USER=""
+  fi
+fi
 
 # A transient system service survives SSH disconnects, including a disconnect
 # caused by installing NetworkManager. Invoke without sudo over SSH so this
@@ -1076,7 +1166,8 @@ if [ "$DRY_RUN" != 1 ] && [ "$CHECK_RUNTIME_DEPS" != 1 ] && [ "$RUNNING_DETACHED
       --property=Type=exec --property=StandardOutput=journal --property=StandardError=journal \
       --property="WorkingDirectory=$working_directory" \
       "$SELF_DIR/install.sh" --_run-detached "${ORIG_ARGS[@]}" \
-      --user "$LOGIN_USER" --robot-home "$ROBOT_HOME" \
+      --admin-user "$ADMIN_USER" --robot-user "$ROBOT_USER" --robot-home "$ROBOT_HOME" \
+      ${PURGE_OLD_USER:+--purge-user "$PURGE_OLD_USER"} \
       || die "could not start the robot-managed install service"
     echo "Follow progress: sudo journalctl -fu $local_unit"
     echo "Check result:    sudo systemctl status $local_unit --no-pager"
@@ -1085,7 +1176,9 @@ if [ "$DRY_RUN" != 1 ] && [ "$CHECK_RUNTIME_DEPS" != 1 ] && [ "$RUNNING_DETACHED
 
   if [ "$(id -u)" != 0 ]; then
     command -v sudo >/dev/null 2>&1 || die "must run as root (sudo not found)"
-    exec sudo "$SELF_DIR/install.sh" "${ORIG_ARGS[@]}" --user "$LOGIN_USER" --robot-home "$ROBOT_HOME"
+    exec sudo "$SELF_DIR/install.sh" "${ORIG_ARGS[@]}" \
+      --admin-user "$ADMIN_USER" --robot-user "$ROBOT_USER" --robot-home "$ROBOT_HOME" \
+      ${PURGE_OLD_USER:+--purge-user "$PURGE_OLD_USER"}
   fi
 fi
 
@@ -1107,6 +1200,7 @@ if [ "$CLEANUP_PACKAGES" = 1 ]; then
 fi
 
 preflight
+setup_accounts
 ensure_base_runtime_dependencies
 ensure_system_profile_dependencies
 ensure_rt_kernel
@@ -1131,6 +1225,11 @@ install_sudoers
 restart_service
 run sync
 summary
+if [ -n "$PURGE_OLD_USER" ] && [ "$PURGE_OLD_USER" != "$ADMIN_USER" ] && [ "$PURGE_OLD_USER" != "$ROBOT_USER" ] && [ "$PURGE_OLD_USER" != "root" ]; then
+  info "Purging old user '$PURGE_OLD_USER' before reboot"
+  run pkill -9 -u "$PURGE_OLD_USER" 2>/dev/null || true
+  run userdel -r "$PURGE_OLD_USER" 2>/dev/null || true
+fi
 if [ "$DRY_RUN" = 1 ]; then
   echo "[dry-run] reboot"
 elif [ "$REBOOT_ON_FINISH" = 1 ]; then

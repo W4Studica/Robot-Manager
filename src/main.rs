@@ -130,6 +130,7 @@ fn run() -> io::Result<()> {
             stop_grace: config.stop_grace()?,
             stop_signals: config.signals(),
             realtime: config.realtime,
+            robot_user: config.robot_user.clone(),
             ..Policy::default()
         },
         stopping,

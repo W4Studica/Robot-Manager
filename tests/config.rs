@@ -15,6 +15,13 @@ fn defaults_match_the_deployed_configuration() {
     assert!(config.riolog_enabled);
 }
 #[test]
+fn robot_user_is_optional_and_parsed() {
+    let config1 = Config::parse(r#"{"robot_home":"/home/lvuser"}"#).unwrap();
+    assert_eq!(config1.robot_user, None);
+    let config2 = Config::parse(r#"{"robot_home":"/home/lvuser","robot_user":"lvuser"}"#).unwrap();
+    assert_eq!(config2.robot_user.as_deref(), Some("lvuser"));
+}
+#[test]
 fn config_home_is_required_and_command_can_be_overridden() {
     assert!(Config::parse("{}").is_err());
     assert!(Config::parse(r#"{"robot_home":""}"#).is_err());
