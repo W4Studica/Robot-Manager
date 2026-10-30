@@ -926,7 +926,7 @@ ensure_system_profile_dependencies() {
 
 install_system_profile() {
   info "Storage protection and boot configuration (applied at next reboot)"
-  info "zram 8 GiB priority 100; disk swap 4 GiB priority 10; volatile logs capped at 64 MiB"
+  info "swap: zram 8 GiB (zstd, <=2 GiB RAM) priority 100, then 4 GiB disk swap priority 10; volatile journal <=64 MiB"
   info "ext4 journal and write barriers retained; no RAM OverlayFS; network wait bounded unless network mounts exist"
   run "$OPT_DIR/robot_manager" storage configure
   # Only disable competing managers for the next boot. swapoff may cause OOM
@@ -1110,7 +1110,7 @@ summary() {
   config:    $CONF_DIR/config.json   (robot_home = $ROBOT_HOME)
   RT kernel: $RT_KERNEL_STATUS
   RT policy: $CONF_DIR/config.json realtime (new/legacy default: auto, SCHED_RR, priority 10; existing policies preserved)
-  next boot: zram 8 GiB + disk swap 4 GiB; volatile logs (64 MiB); ext4 protection; no OverlayFS
+  next boot: swap = zram 8 GiB (zstd, pri 100) + disk 4 GiB (pri 10); volatile journal 64 MiB; ext4 protection; no OverlayFS
   boot check: systemd-analyze critical-chain $SERVICE.service
   boot policy: completed cloud-init retired; online wait skipped only for verified local-only setups (see above)
   Studica:   libraries supplied by GradleRIO deploy; local builds require --build-studica

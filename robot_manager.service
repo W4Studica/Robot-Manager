@@ -18,9 +18,12 @@ RestartSec=2
 # stop the whole robot process tree, not only the main process
 KillMode=control-group
 TimeoutStopSec=15
-# Aggressively swap idle supervisor/worker memory to zram
+# Memory policy: the robot program runs in THIS service's cgroup, so a
+# MemoryHigh here would throttle the robot too. Instead its hot pages are
+# protected (MemoryLow) and only the supervisor's idle pages may be swapped
+# out to zram (see RUNTIME_BASELINE.md, "Swap and memory policy").
 MemorySwapMax=infinity
-MemoryHigh=64M
+MemoryLow=256M
 
 [Install]
 WantedBy=multi-user.target

@@ -9,11 +9,14 @@ pub const GIB: u64 = 1024 * 1024 * 1024;
 pub const SWAP_SIZE: u64 = 4 * GIB;
 pub const SWAP_PATH: &str = "/var/lib/w4studica/swapfile";
 
-pub const ZRAM_CONF: &str = "[zram0]\nzram-size = ram * 2\ncompression-algorithm = zstd\nswap-priority = 100\nfs-type = swap\n";
-pub const JOURNALD_CONF: &str = "[Journal]\nStorage=volatile\nRuntimeMaxUse=64M\n";
-pub const MEMORY_CONF: &str = "# Aggressive zram compressed swap settings for VMX robot background services\nvm.swappiness = 180\nvm.page-cluster = 0\nvm.vfs_cache_pressure = 50\nvm.watermark_boost_factor = 0\nvm.watermark_scale_factor = 125\n";
-pub const NETWORK_WAIT_CONF: &str = "[Unit]\n# Installed by W4Studica storage profile: NetworkManager-wait-online should never wait for an access point or client Wi-Fi that may not connect.\n[Service]\nExecStart=\nExecStart=/usr/bin/nmcli connection show\n";
-pub const LOCAL_BOOT_CONF: &str = "[Unit]\n# Installed only after provisioning, with no remote mounts, iSCSI or unknown\n# online consumers. Create this file to explicitly restore the online wait.\nConditionPathExists=/etc/robot_manager/require-network-online\n";
+// The storage profile files under system/storage/ are the single source of
+// truth: the legacy Python helper reads them at run time and this binary
+// embeds the same bytes at compile time, so the two can never drift apart.
+pub const ZRAM_CONF: &str = include_str!("../system/storage/zram.conf");
+pub const JOURNALD_CONF: &str = include_str!("../system/storage/journald.conf");
+pub const MEMORY_CONF: &str = include_str!("../system/storage/memory.conf");
+pub const NETWORK_WAIT_CONF: &str = include_str!("../system/storage/network-wait.conf");
+pub const LOCAL_BOOT_CONF: &str = include_str!("../system/storage/local-boot.conf");
 
 pub fn run_os(args: &[&str]) -> io::Result<String> {
     let output = Command::new(args[0])

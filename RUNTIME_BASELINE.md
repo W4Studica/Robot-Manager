@@ -44,3 +44,29 @@ encoder/IMU checks, disabled/E-stop transitions, control-loop and DS packet stal
 service restart, process termination, network switch and repeated network undo.
 Record measured stop times and explicit unverified items. Compare the SDK and
 runtime hashes when investigating a regression, even if version labels match.
+
+## Swap and memory policy
+
+The profile files under `system/storage/` are the single source of truth: the
+Rust `robot_manager` embeds them at compile time (`include_str!`) and
+`install.sh` deploys them through `robot_manager storage configure` at the next
+reboot. Nothing is retyped anywhere else.
+
+| Component | Setting | Value | Why |
+|---|---|---|---|
+| zram (`zram-generator`) | logical size | 8192 MiB | compressed swap first, matches the documented baseline |
+| zram | compression | zstd | denser than lzo-rle for idle service pages |
+| zram | host limit | 2048 MiB | zram alone can never exhaust a 2 GiB or 4 GiB board |
+| zram | swap priority | 100 | always preferred over the disk swap file |
+| disk swap | file | `/var/lib/w4studica/swapfile`, 4 GiB, `sw,pri=10,nofail` | overflow for zram; never the first choice |
+| sysctl | `vm.swappiness` | 180 | push idle anonymous pages to compressed swap instead of dropping cache |
+| sysctl | `vm.page-cluster` | 0 | zram is random access; no swap readahead |
+| sysctl | `vm.vfs_cache_pressure` | 50 | keep dentry/inode cache on a slow SD card |
+| sysctl | watermark boost / scale | 0 / 125 | steady background reclaim, no bursty kswapd wakeups |
+| journald | `Storage` / caps | volatile / 64 MiB / 8 MiB per file | no SD-card log writes, bounded RAM use |
+| leaf daemons (`hwmon`, `mrccomm`, `ttyd`) | `MemoryHigh` + `MemorySwapMax` | 32 MiB + infinity | their idle pages are pushed into zram |
+| `robot_manager.service` | `MemoryLow` + `MemorySwapMax` | 256 MiB + infinity | the robot program shares this cgroup: protect its hot pages, never set `MemoryHigh` here |
+
+Installing the profile rewrites `/etc/fstab` swap entries (every other swap file
+is commented out), disables `dphys-swapfile`/`zramswap`/`zram-config` and
+`rsyslog`, and takes effect at the next reboot; a running swap is never touched.

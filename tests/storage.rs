@@ -1,8 +1,86 @@
 use robot_manager::storage::{
-    finish_provisioning, fstab_profile, network_wait_reason, prepare_swap, SWAP_PATH,
+    finish_provisioning, fstab_profile, network_wait_reason, prepare_swap, JOURNALD_CONF,
+    MEMORY_CONF, NETWORK_WAIT_CONF, SWAP_PATH, SWAP_SIZE, ZRAM_CONF,
 };
 use std::fs;
 use std::io;
+
+/// The canonical swap/memory policy (RUNTIME_BASELINE.md, "Swap and memory
+/// policy"). These files are embedded with include_str!, so this test fails if
+/// any value drifts - in the file or in the deployed binary.
+#[test]
+fn canonical_swap_and_memory_policy_is_intact() {
+    for (name, text, keys) in [
+        (
+            "zram.conf",
+            ZRAM_CONF,
+            &[
+                "zram-size = 8192",
+                "compression-algorithm = zstd",
+                "host-memory-limit = 2048",
+                "swap-priority = 100",
+                "fs-type = swap",
+            ][..],
+        ),
+        (
+            "memory.conf",
+            MEMORY_CONF,
+            &[
+                "vm.swappiness = 180",
+                "vm.page-cluster = 0",
+                "vm.vfs_cache_pressure = 50",
+                "vm.watermark_boost_factor = 0",
+                "vm.watermark_scale_factor = 125",
+            ][..],
+        ),
+        (
+            "journald.conf",
+            JOURNALD_CONF,
+            &[
+                "Storage=volatile",
+                "RuntimeMaxUse=64M",
+                "RuntimeMaxFileSize=8M",
+                "ForwardToSyslog=no",
+            ][..],
+        ),
+        (
+            "network-wait.conf",
+            NETWORK_WAIT_CONF,
+            &["nm-online -s -q --timeout=15", "TimeoutStartSec=20s"][..],
+        ),
+    ] {
+        for key in keys {
+            assert!(text.contains(key), "{name} is missing {key:?}");
+        }
+    }
+    // zram must always win over the disk swap file.
+    let zram_priority: u32 = ZRAM_CONF
+        .lines()
+        .find_map(|l| l.strip_prefix("swap-priority = "))
+        .expect("zram swap-priority")
+        .trim()
+        .parse()
+        .unwrap();
+    assert_eq!(SWAP_SIZE, 4 * 1024 * 1024 * 1024);
+    assert_eq!(SWAP_PATH, "/var/lib/w4studica/swapfile");
+    // Cross-check the priorities actually deployed: the fstab line the profile
+    // writes must sit below zram (highest priority wins first).
+    let (fstab, _) = fstab_profile("UUID=root / ext4 defaults 0 1\n").unwrap();
+    let disk_line = fstab
+        .lines()
+        .find(|l| l.contains(SWAP_PATH))
+        .expect("managed swap line");
+    let disk_priority: u32 = disk_line
+        .split("pri=")
+        .nth(1)
+        .and_then(|rest| rest.split(',').next())
+        .and_then(|value| value.parse().ok())
+        .expect("fstab swap priority");
+    assert!(
+        zram_priority > disk_priority,
+        "zram ({zram_priority}) must outrank the disk swap ({disk_priority})"
+    );
+}
 
 #[test]
 fn fstab_profile_updates_ext4_root_and_retires_competing_swaps() {

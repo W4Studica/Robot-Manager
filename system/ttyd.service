@@ -10,7 +10,8 @@ RestartSec=3
 CPUSchedulingPolicy=idle
 # System components stay on Core 4 (CPU index 3); the robot program owns CPU 0,1,2
 CPUAffinity=3
-# Maximize zram usage: allow idle terminal buffers to swap out to zram
+# Memory policy (RUNTIME_BASELINE.md, "Swap and memory policy"): every leaf
+# system daemon has the same soft cap, so its idle pages live in zram.
 MemorySwapMax=infinity
 MemoryHigh=32M
 
