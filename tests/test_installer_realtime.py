@@ -137,7 +137,7 @@ configure_realtime
         unit = (ROOT / "robot_manager.service").read_text()
         self.assertIn("CPUSchedulingPolicy=other", unit)
         self.assertIn("LimitRTPRIO=99", unit)
-
+        self.assertIn("CPUAffinity=3", unit)
 
 if __name__ == "__main__":
     unittest.main()

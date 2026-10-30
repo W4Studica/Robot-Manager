@@ -84,12 +84,15 @@ fn run() -> io::Result<()> {
         return Ok(());
     }
     let supervisor = robot_manager::realtime::configure_supervisor()?;
+    let core = robot_manager::realtime::pin_to_core(3).unwrap_or(0);
     robot_manager::log(
         "INFO",
         format_args!(
-            "supervisor scheduling: {}/{}",
+            "supervisor scheduling: {}/{}, pinned to CPU core {} (Core {})",
             supervisor.name(),
-            supervisor.priority
+            supervisor.priority,
+            core,
+            core + 1
         ),
     );
     let stopping = Arc::new(AtomicBool::new(false));

@@ -253,7 +253,8 @@ impl Report {
     }
 }
 /// Normalize the supervisor before its journal/RioLog workers are created,
-/// including manual launches from a shell with an inherited RT policy.
+/// including manual launches from a shell with an inherited RT policy,
+/// and pin the supervisor to Core 4 (CPU index 3).
 pub fn configure_supervisor() -> io::Result<Snapshot> {
     let report = Prepared {
         mode: Mode::Off,
@@ -263,7 +264,29 @@ pub fn configure_supervisor() -> io::Result<Snapshot> {
     if report.fatal_errno != 0 {
         return Err(io::Error::from_raw_os_error(report.fatal_errno));
     }
+    let _ = pin_to_core(3);
     Ok(report.actual)
+}
+
+/// Pin current thread/process to a specific CPU core index.
+pub fn pin_to_core(core_index: usize) -> io::Result<usize> {
+    unsafe {
+        let num_cpus = libc::sysconf(libc::_SC_NPROCESSORS_ONLN);
+        if num_cpus <= 0 {
+            return Ok(0);
+        }
+        let target = if (core_index as i64) < num_cpus {
+            core_index
+        } else {
+            (num_cpus - 1) as usize
+        };
+        let mut set: libc::cpu_set_t = std::mem::zeroed();
+        libc::CPU_SET(target, &mut set);
+        if libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set) < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(target)
+    }
 }
 
 /// Distinguish full kernel preemption from a userspace scheduling policy.
