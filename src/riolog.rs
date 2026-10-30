@@ -71,7 +71,7 @@ pub struct RioLogServer {
 }
 impl RioLogServer {
     pub fn start(port: u16, history: usize) -> io::Result<Self> {
-        Self::with_limits(port, history, 256, 8)
+        Self::with_limits(port, history, 1024, 8)
     }
     pub fn with_limits(
         port: u16,
@@ -164,6 +164,7 @@ impl Drop for RioLogServer {
     }
 }
 fn add_client(state: &Arc<Mutex<State>>, mut socket: TcpStream) -> io::Result<()> {
+    socket.set_nodelay(true)?;
     socket.set_write_timeout(Some(Duration::from_secs(1)))?;
     socket.set_read_timeout(Some(Duration::from_millis(50)))?;
     let control = socket.try_clone()?;
@@ -190,16 +191,25 @@ fn add_client(state: &Arc<Mutex<State>>, mut socket: TcpStream) -> io::Result<()
         .name("riolog-client".into())
         .spawn(move || {
             loop {
-                if disconnected(&mut socket) {
-                    break;
-                }
                 match receiver.recv_timeout(Duration::from_millis(50)) {
                     Ok(frame) => {
-                        if socket.write_all(&frame).is_err() {
+                        let mut batch = Vec::with_capacity(4096);
+                        batch.extend_from_slice(&frame);
+                        while batch.len() < 4096 {
+                            match receiver.try_recv() {
+                                Ok(next) => batch.extend_from_slice(&next),
+                                Err(_) => break,
+                            }
+                        }
+                        if socket.write_all(&batch).is_err() {
                             break;
                         }
                     }
-                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        if disconnected(&mut socket) {
+                            break;
+                        }
+                    }
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 }
             }
