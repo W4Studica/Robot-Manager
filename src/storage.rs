@@ -11,7 +11,7 @@ pub const SWAP_PATH: &str = "/var/lib/w4studica/swapfile";
 
 pub const ZRAM_CONF: &str = "[zram0]\nzram-size = ram * 2\ncompression-algorithm = zstd\nswap-priority = 100\nfs-type = swap\n";
 pub const JOURNALD_CONF: &str = "[Journal]\nStorage=volatile\nRuntimeMaxUse=64M\n";
-pub const MEMORY_CONF: &str = "vm.swappiness=180\nvm.watermark_boost_factor=0\nvm.watermark_scale_factor=125\n";
+pub const MEMORY_CONF: &str = "# Aggressive zram compressed swap settings for VMX robot background services\nvm.swappiness = 180\nvm.page-cluster = 0\nvm.vfs_cache_pressure = 50\nvm.watermark_boost_factor = 0\nvm.watermark_scale_factor = 125\n";
 pub const NETWORK_WAIT_CONF: &str = "[Unit]\n# Installed by W4Studica storage profile: NetworkManager-wait-online should never wait for an access point or client Wi-Fi that may not connect.\n[Service]\nExecStart=\nExecStart=/usr/bin/nmcli connection show\n";
 pub const LOCAL_BOOT_CONF: &str = "[Unit]\n# Installed only after provisioning, with no remote mounts, iSCSI or unknown\n# online consumers. Create this file to explicitly restore the online wait.\nConditionPathExists=/etc/robot_manager/require-network-online\n";
 

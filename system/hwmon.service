@@ -1,0 +1,16 @@
+[Unit]
+Description=Studica VMX hardware monitor (CPU temperature, voltage throttling, RAM/zram)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/opt/robot_manager/robot_manager hwmon --daemon --interval 5
+Restart=always
+RestartSec=5
+CPUSchedulingPolicy=idle
+# Maximize zram usage: allow background hwmon pages to swap out aggressively
+MemorySwapMax=infinity
+MemoryHigh=16M
+
+[Install]
+WantedBy=multi-user.target

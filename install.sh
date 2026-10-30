@@ -239,6 +239,8 @@ ensure_base_runtime_dependencies() {
   dpkg-query -W -f='${Status}' libstdc++6 2>/dev/null | grep -q 'install ok installed' || packages+=(libstdc++6)
   dpkg-query -W -f='${Status}' libgcc-s1 2>/dev/null | grep -q 'install ok installed' || packages+=(libgcc-s1)
   dpkg-query -W -f='${Status}' libatomic1 2>/dev/null | grep -q 'install ok installed' || packages+=(libatomic1)
+  dpkg-query -W -f='${Status}' systemd-timesyncd 2>/dev/null | grep -q 'install ok installed' || packages+=(systemd-timesyncd)
+  dpkg-query -W -f='${Status}' ttyd 2>/dev/null | grep -q 'install ok installed' || packages+=(ttyd)
   if ! command -v ldd >/dev/null 2>&1 || ! command -v ldconfig >/dev/null 2>&1; then
     packages+=(libc-bin)
   fi
@@ -740,8 +742,29 @@ EOF
   run rm -f "$OPT_DIR/robot_manager.py"
   run systemctl daemon-reload
   run systemctl enable "$SERVICE"
+  install_systemcore_services
 }
 
+install_systemcore_services() {
+  info "SystemCore compatibility services (mrccomm, hwmon, irqconf, ttyd, timesyncd)"
+  run install -d -m 0755 /etc/systemd/timesyncd.conf.d
+  run install -m 0644 "$RM_DIR/system/99-w4studica-timesyncd.conf" /etc/systemd/timesyncd.conf.d/99-w4studica.conf
+  run systemctl enable systemd-timesyncd 2>/dev/null || true
+
+  if command -v ttyd >/dev/null 2>&1 || [ "$DRY_RUN" = 1 ]; then
+    run install -m 0644 "$RM_DIR/system/ttyd.service" /etc/systemd/system/ttyd.service
+    run systemctl enable ttyd.service 2>/dev/null || true
+  fi
+
+  run install -m 0644 "$RM_DIR/system/hwmon.service" /etc/systemd/system/hwmon.service
+  run systemctl enable hwmon.service 2>/dev/null || true
+
+  run install -m 0644 "$RM_DIR/system/irqconf.service" /etc/systemd/system/irqconf.service
+  run systemctl enable irqconf.service 2>/dev/null || true
+
+  run install -m 0644 "$RM_DIR/system/mrccomm.service" /etc/systemd/system/mrccomm.service
+  run systemctl enable mrccomm.service 2>/dev/null || true
+}
 install_studica_notices() {
   if [ "$SKIP_DRIVERS" = 1 ] && [ "$SKIP_PLUGIN" = 1 ]; then return; fi
   run install -d -m 0755 "$OPT_DIR/licenses/studica"
@@ -1096,7 +1119,8 @@ summary() {
   build:     C helpers / Rust manager (missing packages installed by apt; --no-install-deps disables this)
   cpu:       systemctl status robot_cpu_max      (governor performance, at every boot)
   network:   setupHotspot WorldSkills 1234 2.4 password; toggleNetMode ap; saved Wi-Fi profiles are deleted
-  runtime:   ./install.sh --check-runtime-deps --user $LOGIN_USER (after GradleRIO deploy)
+  terminal:  http://10.TE.AM.2:7681 (ttyd web terminal)
+  SystemCore: mrccomm.service (DS port 1110), hwmon.service, irqconf.service
 WPILib/OpenCV shared libraries are deployed per project by GradleRIO; this installer checks them but does not select a global OpenCV version.
 EOF
 }

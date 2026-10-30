@@ -38,6 +38,15 @@ fn run() -> io::Result<()> {
             Err(err) => return Err(err),
         }
     }
+    if let Some(result) = robot_manager::hwmon::dispatch(&string_args) {
+        return result;
+    }
+    if let Some(result) = robot_manager::irqconf::dispatch(&string_args) {
+        return result;
+    }
+    if let Some(result) = robot_manager::mrccomm::dispatch(&string_args) {
+        return result;
+    }
     let mut path = PathBuf::from(config::DEFAULT_CONFIG);
     let mut check = false;
     let mut args = std::env::args_os().skip(1);

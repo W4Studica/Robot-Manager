@@ -1,0 +1,12 @@
+[Unit]
+Description=W4Studica: Network IRQ affinity and CPU isolation (pin to CPU 0,1)
+After=network.target
+Before=robot_manager.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/robot_manager/robot_manager irqconf
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

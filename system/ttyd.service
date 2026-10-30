@@ -1,0 +1,16 @@
+[Unit]
+Description=W4Studica Web Terminal (ttyd on port 7681)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ttyd -p 7681 -t fontSize=14 login
+Restart=always
+RestartSec=3
+CPUSchedulingPolicy=idle
+# Maximize zram usage: allow idle terminal buffers to swap out to zram
+MemorySwapMax=infinity
+MemoryHigh=32M
+
+[Install]
+WantedBy=multi-user.target

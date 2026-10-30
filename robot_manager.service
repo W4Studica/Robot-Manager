@@ -16,6 +16,9 @@ RestartSec=2
 # stop the whole robot process tree, not only the main process
 KillMode=control-group
 TimeoutStopSec=15
+# Aggressively swap idle supervisor/worker memory to zram
+MemorySwapMax=infinity
+MemoryHigh=64M
 
 [Install]
 WantedBy=multi-user.target

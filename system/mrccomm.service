@@ -1,0 +1,17 @@
+[Unit]
+Description=W4Studica MrcCommDaemon: FRC Driver Station communication protocol
+After=network.target
+Wants=robot.service
+
+[Service]
+Type=simple
+ExecStart=/opt/robot_manager/robot_manager mrccomm --port 1110 --ds-port 1150
+Restart=always
+RestartSec=2
+CPUSchedulingPolicy=other
+# Maximize zram usage: allow idle background pages to swap out to zram
+MemorySwapMax=infinity
+MemoryHigh=32M
+
+[Install]
+WantedBy=multi-user.target
