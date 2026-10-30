@@ -8,6 +8,8 @@ ExecStart=/usr/bin/ttyd -p 7681 -t fontSize=14 login
 Restart=always
 RestartSec=3
 CPUSchedulingPolicy=idle
+# System components stay on Core 4 (CPU index 3); the robot program owns CPU 0,1,2
+CPUAffinity=3
 # Maximize zram usage: allow idle terminal buffers to swap out to zram
 MemorySwapMax=infinity
 MemoryHigh=32M

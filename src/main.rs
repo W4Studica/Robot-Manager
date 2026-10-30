@@ -83,12 +83,11 @@ fn run() -> io::Result<()> {
         println!("configuration valid: {}", path.display());
         return Ok(());
     }
-    let supervisor = robot_manager::realtime::configure_supervisor()?;
-    let core = robot_manager::realtime::pin_to_core(3).unwrap_or(0);
+    let (supervisor, core) = robot_manager::realtime::configure_supervisor()?;
     robot_manager::log(
         "INFO",
         format_args!(
-            "supervisor scheduling: {}/{}, pinned to CPU core {} (Core {})",
+            "supervisor scheduling: {}/{}, pinned to CPU core {} (Core {}); robot program keeps all other CPUs",
             supervisor.name(),
             supervisor.priority,
             core,

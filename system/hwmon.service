@@ -8,6 +8,8 @@ ExecStart=/opt/robot_manager/robot_manager hwmon --daemon --interval 5
 Restart=always
 RestartSec=5
 CPUSchedulingPolicy=idle
+# System components stay on Core 4 (CPU index 3); the robot program owns CPU 0,1,2
+CPUAffinity=3
 # Maximize zram usage: allow background hwmon pages to swap out aggressively
 MemorySwapMax=infinity
 MemoryHigh=16M

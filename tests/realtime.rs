@@ -236,7 +236,7 @@ fn truncated_scheduling_reports_are_errors() {
 }
 
 #[test]
-fn child_process_affinity_is_reset_to_all_cores() {
+fn robot_program_runs_on_every_cpu_except_the_reserved_system_core() {
     use robot_manager::output::Journal;
     use robot_manager::realtime::pin_to_core;
     use std::os::unix::fs::PermissionsExt;
@@ -244,10 +244,12 @@ fn child_process_affinity_is_reset_to_all_cores() {
     let temp = tempfile::tempdir().unwrap();
     let command = temp.path().join("probe.sh");
     let out = temp.path().join("affinity.txt");
+    // Shell built-ins only (read/case/printf): the robot process runs with a
+    // cleared environment, so the probe must not look anything up in PATH.
     fs::write(
         &command,
         format!(
-            "#!/bin/sh\npython3 -c 'import os; print(len(os.sched_getaffinity(0)))' > {}\n",
+            "#!/bin/sh\nwhile IFS= read -r line; do\n  case \"$line\" in\n    Cpus_allowed_list:*) printf '%s\\n' \"${{line#Cpus_allowed_list:}}\" > '{}' ;;\n  esac\ndone < /proc/self/status\n",
             out.display()
         ),
     )
@@ -271,14 +273,40 @@ fn child_process_affinity_is_reset_to_all_cores() {
     )
     .unwrap();
 
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !out.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
     let _ = group.stop(&[libc::SIGTERM], Duration::from_secs(2));
-    if out.exists() {
-        let count: usize = fs::read_to_string(&out).unwrap().trim().parse().unwrap_or(0);
-        let num_cpus = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) } as usize;
-        let expected = if num_cpus > 1 { num_cpus - 1 } else { 1 };
+
+    let text = fs::read_to_string(&out).expect("probe must record the child affinity");
+    let cpus = expand_cpu_list(&text);
+    let num_cpus = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) } as usize;
+    if num_cpus > 1 {
+        assert!(
+            !cpus.contains(&robot_manager::realtime::SUPERVISOR_CORE),
+            "robot program must never run on the reserved system core: {cpus:?}"
+        );
         assert_eq!(
-            count, expected,
-            "child should have affinity to {expected} CPUs, excluding supervisor CPU 3"
+            cpus.len(),
+            num_cpus - 1,
+            "robot program must own every other CPU: {cpus:?}"
         );
     }
+}
+
+/// Expand a `Cpus_allowed_list` value such as "0-2,4-15" into CPU indices.
+fn expand_cpu_list(text: &str) -> Vec<usize> {
+    let mut cpus = Vec::new();
+    for part in text.trim().split(',') {
+        match part.split_once('-') {
+            Some((first, last)) => {
+                let first: usize = first.trim().parse().expect("range start");
+                let last: usize = last.trim().parse().expect("range end");
+                cpus.extend(first..=last);
+            }
+            None => cpus.push(part.trim().parse().expect("cpu index")),
+        }
+    }
+    cpus
 }

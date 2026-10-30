@@ -64,13 +64,18 @@ impl MrcCommDaemon {
         reply_port: u16,
         battery_volts: f32,
     ) -> io::Result<()> {
+        // System component: stay on the reserved core even when launched by hand.
+        let core = crate::realtime::pin_to_core(crate::realtime::SUPERVISOR_CORE).unwrap_or(0);
         let socket = UdpSocket::bind(("0.0.0.0", listen_port))?;
         socket.set_read_timeout(Some(Duration::from_millis(50)))?;
         socket.set_nonblocking(false)?;
 
         crate::log(
             "INFO",
-            format_args!("MrcComm daemon listening on UDP port {listen_port}, replying on {reply_port}"),
+            format_args!(
+                "MrcComm daemon listening on UDP port {listen_port}, replying on {reply_port} (CPU core {core}, Core {})",
+                core + 1
+            ),
         );
 
         let mut buf = [0u8; 1024];

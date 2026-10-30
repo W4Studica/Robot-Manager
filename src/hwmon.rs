@@ -197,7 +197,16 @@ fn read_loadavg() -> (f32, f32, f32) {
 }
 
 pub fn run_daemon(interval: Duration, alert_temp_c: f32) -> io::Result<()> {
-    crate::log("INFO", "hwmon daemon started (monitoring temperature and voltage)");
+    // System component: stay on the reserved core even when launched by hand.
+    let core = crate::realtime::pin_to_core(crate::realtime::SUPERVISOR_CORE).unwrap_or(0);
+    crate::log(
+        "INFO",
+        format_args!(
+            "hwmon daemon started on CPU core {} (Core {}); monitoring temperature and voltage",
+            core,
+            core + 1
+        ),
+    );
     let mut last_throttled = 0;
     loop {
         if let Ok(stats) = HardwareStats::collect() {

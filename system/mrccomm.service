@@ -9,6 +9,8 @@ ExecStart=/opt/robot_manager/robot_manager mrccomm --port 1110 --ds-port 1150
 Restart=always
 RestartSec=2
 CPUSchedulingPolicy=other
+# System components stay on Core 4 (CPU index 3); the robot program owns CPU 0,1,2
+CPUAffinity=3
 # Maximize zram usage: allow idle background pages to swap out to zram
 MemorySwapMax=infinity
 MemoryHigh=32M

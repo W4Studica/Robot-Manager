@@ -1,10 +1,12 @@
 [Unit]
-Description=W4Studica: Network IRQ affinity and CPU isolation (pin to CPU 0,1)
+Description=W4Studica: Move network IRQ affinity to CPU 3, isolating CPU 0,1,2 for the robot program
 After=network.target
 Before=robot_manager.service
 
 [Service]
 Type=oneshot
+# System components stay on Core 4 (CPU index 3); the robot program owns CPU 0,1,2
+CPUAffinity=3
 ExecStart=/opt/robot_manager/robot_manager irqconf
 RemainAfterExit=yes
 

@@ -6,6 +6,8 @@ After=systemd-rfkill.service
 
 [Service]
 Type=oneshot
+# System components stay on Core 4 (CPU index 3); the robot program owns CPU 0,1,2
+CPUAffinity=3
 ExecStart=-/usr/sbin/rfkill unblock wifi
 ExecStart=-/usr/bin/nmcli radio wifi on
 RemainAfterExit=yes

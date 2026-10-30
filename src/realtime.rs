@@ -252,10 +252,16 @@ impl Report {
         );
     }
 }
+/// CPU index reserved for RobotManager and every W4Studica system component
+/// (Core 4 in one-based board naming). The robot program runs on all other
+/// CPUs; network IRQs are moved here too, so CPU 0..2 stay free for it.
+pub const SUPERVISOR_CORE: usize = 3;
+
 /// Normalize the supervisor before its journal/RioLog workers are created,
 /// including manual launches from a shell with an inherited RT policy,
-/// and pin the supervisor to Core 4 (CPU index 3).
-pub fn configure_supervisor() -> io::Result<Snapshot> {
+/// and pin the supervisor to the reserved system core. Returns the scheduling
+/// actually applied and the CPU index the process runs on.
+pub fn configure_supervisor() -> io::Result<(Snapshot, usize)> {
     let report = Prepared {
         mode: Mode::Off,
         target: Snapshot::NORMAL,
@@ -264,8 +270,8 @@ pub fn configure_supervisor() -> io::Result<Snapshot> {
     if report.fatal_errno != 0 {
         return Err(io::Error::from_raw_os_error(report.fatal_errno));
     }
-    let _ = pin_to_core(3);
-    Ok(report.actual)
+    let core = pin_to_core(SUPERVISOR_CORE).unwrap_or(0);
+    Ok((report.actual, core))
 }
 
 /// Pin current thread/process to a specific CPU core index.
