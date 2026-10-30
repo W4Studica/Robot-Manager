@@ -236,7 +236,7 @@ install_system_profile
 ''')
             result = subprocess.run(["bash", str(harness)], capture_output=True, text=True, env=os.environ, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("[dry-run] python3", result.stdout)
+            self.assertIn("storage configure", result.stdout)
             self.assertNotIn("update-initramfs", result.stdout)
             self.assertNotIn("[dry-run] dracut", result.stdout)
             self.assertIn("systemctl mask zramswap.service", result.stdout)

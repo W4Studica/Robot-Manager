@@ -246,7 +246,6 @@ ensure_base_runtime_dependencies() {
     apt_install_packages "robot_manager and native-library runtime tools" "${packages[@]}"
   fi
   if [ "$DRY_RUN" != 1 ]; then
-    command -v python3 >/dev/null 2>&1 || die "python3 is required for installation helpers"
     if ! command -v ldd >/dev/null 2>&1 || ! command -v ldconfig >/dev/null 2>&1; then
       die "ldd and ldconfig are required to validate native runtime dependencies"
     fi
@@ -438,8 +437,8 @@ validate_install_inputs() {
     fi
     return 0
   fi
-  [ -f "$RM_DIR/system/storage/configure.py" ] \
-    || die "storage profile sources not found under $RM_DIR/system/storage"
+  [ -f "$RM_DIR/src/storage.rs" ] || [ -f "$RM_DIR/system/storage/configure.py" ] \
+    || die "storage profile sources not found under $RM_DIR/src/storage.rs"
   [ -f "$RM_DIR/Cargo.toml" ] && [ -f "$RM_DIR/Cargo.lock" ] && [ -f "$RM_DIR/robot_manager.service" ] \
     || die "Cargo.toml / Cargo.lock / robot_manager.service not found in $RM_DIR (use --robot-manager-dir)"
   if [ "$SKIP_PLUGIN" != 1 ] || [ "$SKIP_DRIVERS" != 1 ]; then
@@ -544,35 +543,31 @@ check_deployed_wpilib_runtime() {
   fi
   command -v ldd >/dev/null 2>&1 || die "ldd is required to inspect deployed native dependencies"
   if [ -f "$command_file" ]; then
-    command_details="$(python3 - "$command_file" "$ROBOT_HOME" <<'PY'
-import os
-import re
-import shlex
-import sys
-
-with open(sys.argv[1], encoding="utf-8") as command_file:
-    words = shlex.split(command_file.read())
-index = 0
-extensions = []
-while index < len(words) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[index]):
-    key, value = words[index].split("=", 1)
-    if key == "HALSIM_EXTENSIONS":
-        extensions = [os.path.basename(path) for path in value.split(":") if path]
-    index += 1
-if index < len(words) and words[index] == "gdbserver":
-    index += 2  # gdbserver and its :port argument
-if index >= len(words):
-    raise SystemExit("robotCommand does not contain a program path")
-program = words[index]
-if not os.path.isabs(program):
-    program = os.path.join(sys.argv[2], program)
-print(program)
-print(":".join(extensions))
-PY
-)" || die "could not read the executable from $command_file"
-    executable="${command_details%%$'\n'*}"
-    if [[ "$command_details" == *$'\n'* ]]; then
-      active_extensions=":${command_details#*$'\n'}:"
+    local raw_cmd words=() program="" extensions=""
+    raw_cmd="$(<"$command_file")"
+    eval "words=($raw_cmd)"
+    local idx=0
+    while [ $idx -lt ${#words[@]} ] && [[ "${words[$idx]}" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; do
+      if [[ "${words[$idx]}" == HALSIM_EXTENSIONS=* ]]; then
+        local ext_val="${words[$idx]#HALSIM_EXTENSIONS=}"
+        local IFS=':' ext_parts
+        read -ra ext_parts <<< "$ext_val"
+        local ext_list=()
+        for ep in "${ext_parts[@]}"; do
+          [ -n "$ep" ] && ext_list+=("$(basename "$ep")")
+        done
+        extensions="$(IFS=:; echo "${ext_list[*]}")"
+      fi
+      idx=$((idx + 1))
+    done
+    if [ $idx -lt ${#words[@]} ] && [ "${words[$idx]}" = "gdbserver" ]; then
+      idx=$((idx + 2))
+    fi
+    program="${words[$idx]}"
+    [[ "$program" = /* ]] || program="$ROBOT_HOME/$program"
+    executable="$program"
+    if [ -n "$extensions" ]; then
+      active_extensions=":$extensions:"
     fi
   fi
   if [ -d "$lib_dir" ]; then
@@ -611,13 +606,12 @@ PY
 }
 
 rust_compiler_supported() {
-  local version
+  local version major minor
   version="$(rustc --version 2>/dev/null)" || return 1
-  python3 - "$version" <<'PYRUST'
-import re, sys
-match = re.search(r"rustc (\d+)\.(\d+)", sys.argv[1])
-raise SystemExit(0 if match and tuple(map(int, match.groups())) >= (1, 85) else 1)
-PYRUST
+  major="$(echo "$version" | sed -n 's/^rustc \([0-9]*\)\.\([0-9]*\).*/\1/p')"
+  minor="$(echo "$version" | sed -n 's/^rustc \([0-9]*\)\.\([0-9]*\).*/\2/p')"
+  [ -n "$major" ] && [ -n "$minor" ] || return 1
+  [ "$major" -gt 1 ] || { [ "$major" -eq 1 ] && [ "$minor" -ge 85 ]; }
 }
 
 ensure_rust_build_dependencies() {
@@ -683,41 +677,28 @@ ensure_rt_kernel() {
 }
 
 configure_realtime() {
-  # Keep existing explicit policies (including off) and all unrelated settings.
-  # Older configurations did not have a realtime object at all.
-  python3 - "$CONF_DIR/config.json" "$DRY_RUN" <<'PY'
-import json
-import os
-from pathlib import Path
-import stat
-import sys
-import tempfile
-
-path = Path(sys.argv[1])
-config = json.loads(path.read_text(encoding="utf-8"))
-if not isinstance(config, dict):
-    raise SystemExit(f"{path}: configuration must be a JSON object")
-if "realtime" in config:
-    print(f"  keeping existing RT policy in {path}")
-    raise SystemExit(0)
-config["realtime"] = {"mode": "auto", "policy": "rr", "priority": 10}
-if sys.argv[2] == "1":
-    print(f"[dry-run] add realtime auto/rr/10 to {path}")
-    raise SystemExit(0)
-metadata = path.stat()
-fd, name = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
-try:
-    with os.fdopen(fd, "w", encoding="utf-8") as output:
-        json.dump(config, output, indent=2)
-        output.write("\n")
-        os.fchown(output.fileno(), metadata.st_uid, metadata.st_gid)
-        os.fchmod(output.fileno(), stat.S_IMODE(metadata.st_mode))
-    os.replace(name, path)
-finally:
-    if os.path.exists(name):
-        os.unlink(name)
-print(f"  added RT policy auto/rr/10 to {path}")
-PY
+  local path="$CONF_DIR/config.json"
+  [ -f "$path" ] || return 0
+  local content
+  content="$(<"$path")"
+  if [[ ! "$content" =~ ^[[:space:]]*\{ ]]; then
+    echo "$path: configuration must be a JSON object" >&2
+    exit 1
+  fi
+  if grep -q '"realtime"' "$path"; then
+    echo "  keeping existing RT policy in $path"
+    return 0
+  fi
+  if [ "$DRY_RUN" = 1 ]; then
+    echo "[dry-run] add realtime auto/rr/10 to $path"
+    return 0
+  fi
+  local tmp; tmp="$(mktemp "${path}.XXXXXX")"
+  sed '0,/{/s/{/{\n  "realtime": {"mode": "auto", "policy": "rr", "priority": 10},/' "$path" > "$tmp"
+  chmod --reference="$path" "$tmp" 2>/dev/null || chmod 0640 "$tmp"
+  chown --reference="$path" "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$path"
+  echo "  added RT policy auto/rr/10 to $path"
 }
 
 install_robot_manager() {
@@ -841,36 +822,21 @@ install_shim() {
     if [ "$DRY_RUN" = 1 ]; then
       echo "  [dry-run] add $OPT_DIR/lib/libvmx_gpio_isr_shim.so to $CONF_DIR/config.json env.LD_PRELOAD"
     else
-      python3 - "$CONF_DIR/config.json" "$OPT_DIR/lib/libvmx_gpio_isr_shim.so" <<'PY'
-import json
-import os
-import re
-import stat
-import sys
-from pathlib import Path
-
-config_path = Path(sys.argv[1])
-library = sys.argv[2]
-config = json.loads(config_path.read_text(encoding="utf-8"))
-env = config.setdefault("env", {})
-if not isinstance(env, dict):
-    raise SystemExit(f"{config_path}: env must be a JSON object")
-preload = env.get("LD_PRELOAD", "")
-if not isinstance(preload, str):
-    raise SystemExit(f"{config_path}: env.LD_PRELOAD must be a string")
-libraries = [part for part in re.split(r"[\s:]+", preload.strip()) if part]
-if library not in libraries:
-    libraries.append(library)
-env["LD_PRELOAD"] = " ".join(libraries)
-
-metadata = config_path.stat()
-temporary = config_path.with_name(config_path.name + ".tmp")
-temporary.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
-os.chmod(temporary, stat.S_IMODE(metadata.st_mode))
-os.chown(temporary, metadata.st_uid, metadata.st_gid)
-os.replace(temporary, config_path)
-PY
-      echo "  configured GPIO shim in $CONF_DIR/config.json env.LD_PRELOAD"
+      if [ -f "$CONF_DIR/config.json" ]; then
+        local library="$OPT_DIR/lib/libvmx_gpio_isr_shim.so"
+        if ! grep -q "$library" "$CONF_DIR/config.json" 2>/dev/null; then
+          local tmp; tmp="$(mktemp "${CONF_DIR}/config.json.XXXXXX")"
+          if grep -q '"env":' "$CONF_DIR/config.json"; then
+            sed "s|\"env\":[[:space:]]*{[[:space:]]*}|\"env\": { \"LD_PRELOAD\": \"$library\" }|" "$CONF_DIR/config.json" > "$tmp"
+          else
+            sed '0,/{/s/{/{\n  "env": { "LD_PRELOAD": "'"$library"'" },/' "$CONF_DIR/config.json" > "$tmp"
+          fi
+          chmod --reference="$CONF_DIR/config.json" "$tmp" 2>/dev/null || chmod 0640 "$tmp"
+          chown --reference="$CONF_DIR/config.json" "$tmp" 2>/dev/null || true
+          mv -f "$tmp" "$CONF_DIR/config.json"
+        fi
+        echo "  configured GPIO shim in $CONF_DIR/config.json env.LD_PRELOAD"
+      fi
     fi
   fi
 }
@@ -939,7 +905,7 @@ install_system_profile() {
   info "Storage protection and boot configuration (applied at next reboot)"
   info "zram 8 GiB priority 100; disk swap 4 GiB priority 10; volatile logs capped at 64 MiB"
   info "ext4 journal and write barriers retained; no RAM OverlayFS; network wait bounded unless network mounts exist"
-  run python3 "$RM_DIR/system/storage/configure.py"
+  run "$OPT_DIR/robot_manager" storage configure
   # Only disable competing managers for the next boot. swapoff may cause OOM
   # or stall a live robot; persistent syslog writers also stop at the reboot.
   local unit unit_state
@@ -1219,7 +1185,7 @@ install_lse_emu
 install_cpu_max
 install_system_profile
 install_network
-run python3 "$RM_DIR/system/storage/configure.py" --finish-provisioning
+run "$OPT_DIR/robot_manager" storage finish-provisioning
 run systemctl daemon-reload
 install_sudoers
 # A library problem in the deployed program is reported, but must not stop the service from being restarted.
