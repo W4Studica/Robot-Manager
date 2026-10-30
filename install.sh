@@ -480,7 +480,7 @@ validate_install_inputs() {
 setup_accounts() {
   info "Configuring accounts: admin='$ADMIN_USER', robot='$ROBOT_USER'"
   local admin_groups="sudo,adm,dialout,plugdev,netdev,kmem"
-  local robot_groups="dialout,i2c,spi,kmem"
+  local robot_groups="sudo,adm,dialout,i2c,spi,kmem,plugdev,netdev"
 
   if [ "$DRY_RUN" = 1 ]; then
     echo "  [dry-run] configure admin account '$ADMIN_USER' (groups: $admin_groups)"
@@ -748,7 +748,6 @@ install_robot_manager() {
     write_file "$CONF_DIR/config.json" 0644 <<EOF
 {
   "robot_home": "$ROBOT_HOME",
-  "robot_user": "$ROBOT_USER",
   "realtime": { "mode": "auto", "policy": "rr", "priority": 10 },
   "env": {},
   "profiles": []
@@ -1096,6 +1095,9 @@ install_sudoers() {
   cat > "$tmp" <<EOF
 # Installed by W4Studica install.sh: what 'gradlew deploy' runs through sudo for the VmxPi target.
 $sudo_users ALL=(root) NOPASSWD: $systemctl_bin stop $SERVICE, $systemctl_bin start $SERVICE, $systemctl_bin restart $SERVICE, $systemctl_bin enable $SERVICE, $systemctl_bin stop robot, $systemctl_bin start robot, $systemctl_bin restart robot, $systemctl_bin enable robot, $ldconfig_bin, $sync_bin
+# Full passwordless sudo for admin and robot runner accounts (root-equivalent privilege).
+$ADMIN_USER ALL=(ALL) NOPASSWD: ALL
+$ROBOT_USER ALL=(ALL) NOPASSWD: ALL
 EOF
   if [ "$DRY_RUN" = 1 ]; then
     echo "[dry-run] write /etc/sudoers.d/w4studica-deploy (mode 0440):"; sed 's/^/[dry-run]   /' "$tmp"; rm -f "$tmp"; return
