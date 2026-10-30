@@ -54,8 +54,10 @@ class ProfileFileTest(unittest.TestCase):
         for name in ["zram.conf", "journald.conf", "memory.conf", "network-wait.conf", "local-boot.conf"]:
             with self.subTest(name=name):
                 self.assertIn(f'include_str!("../system/storage/{name}")', text)
-        self.assertNotIn("zram-size =", text, "policy literals must not be duplicated in Rust")
-        self.assertNotIn("vm.swappiness", text, "policy literals must not be duplicated in Rust")
+        # Only key names may appear in Rust; the values must come from the files.
+        for duplicated in ["zram-size =", "swappiness =", "swap-priority =", "page-cluster ="]:
+            with self.subTest(literal=duplicated):
+                self.assertNotIn(duplicated, text, "policy values must not be duplicated in Rust")
 
 
 class UnitPolicyTest(unittest.TestCase):

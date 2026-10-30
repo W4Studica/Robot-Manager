@@ -439,8 +439,8 @@ validate_install_inputs() {
     fi
     return 0
   fi
-  [ -f "$RM_DIR/src/storage.rs" ] || [ -f "$RM_DIR/system/storage/configure.py" ] \
-    || die "storage profile sources not found under $RM_DIR/src/storage.rs"
+  [ -f "$RM_DIR/src/storage.rs" ] \
+    || die "storage profile source not found at $RM_DIR/src/storage.rs"
   [ -f "$RM_DIR/Cargo.toml" ] && [ -f "$RM_DIR/Cargo.lock" ] && [ -f "$RM_DIR/robot_manager.service" ] \
     || die "Cargo.toml / Cargo.lock / robot_manager.service not found in $RM_DIR (use --robot-manager-dir)"
   if [ "$SKIP_PLUGIN" != 1 ] || [ "$SKIP_DRIVERS" != 1 ]; then
@@ -678,29 +678,21 @@ ensure_rt_kernel() {
   warn "$RT_KERNEL_STATUS. The installer does not reboot automatically."
 }
 
+# The realtime policy is owned by the binary (`config ensure-realtime`): it
+# keeps an existing policy byte for byte and only edits JSON through serde.
+# A dry run must work before the binary is built, so it only previews.
 configure_realtime() {
   local path="$CONF_DIR/config.json"
   [ -f "$path" ] || return 0
-  local content
-  content="$(<"$path")"
-  if [[ ! "$content" =~ ^[[:space:]]*\{ ]]; then
-    echo "$path: configuration must be a JSON object" >&2
-    exit 1
-  fi
-  if grep -q '"realtime"' "$path"; then
-    echo "  keeping existing RT policy in $path"
-    return 0
-  fi
   if [ "$DRY_RUN" = 1 ]; then
-    echo "[dry-run] add realtime auto/rr/10 to $path"
+    if grep -q '"realtime"' "$path"; then
+      echo "  keeping existing RT policy in $path"
+    else
+      echo "[dry-run] add realtime auto/rr/10 to $path"
+    fi
     return 0
   fi
-  local tmp; tmp="$(mktemp "${path}.XXXXXX")"
-  sed '0,/{/s/{/{\n  "realtime": {"mode": "auto", "policy": "rr", "priority": 10},/' "$path" > "$tmp"
-  chmod --reference="$path" "$tmp" 2>/dev/null || chmod 0640 "$tmp"
-  chown --reference="$path" "$tmp" 2>/dev/null || true
-  mv -f "$tmp" "$path"
-  echo "  added RT policy auto/rr/10 to $path"
+  run "$OPT_DIR/robot_manager" config ensure-realtime "$path"
 }
 
 install_robot_manager() {
@@ -714,6 +706,10 @@ install_robot_manager() {
     "$binary" --version || die "robot_manager binary cannot run on this robot"
     "$binary" network --help >/dev/null || die "robot_manager binary is missing Rust network commands"
     "$binary" network-backup --help >/dev/null || die "robot_manager binary is missing Rust network backup"
+    local config_help
+    config_help="$("$binary" config 2>&1 || true)"
+    grep -q 'usage: robot_manager config' <<<"$config_help" \
+      || die "robot_manager binary is missing Rust config commands"
   fi
   run install -d -m 0755 "$OPT_DIR" "$CONF_DIR"
   run install -d -m 0755 "$OPT_DIR/licenses"
@@ -842,24 +838,12 @@ install_shim() {
   run install -m 0755 "$BUILD_DIR/gpio_isr_shim/libvmx_gpio_isr_shim.so" "$OPT_DIR/lib/libvmx_gpio_isr_shim.so"
   if [ "$DRY_RUN" != 1 ]; then verify_shared_library "$OPT_DIR/lib/libvmx_gpio_isr_shim.so"; fi
   if [ ! -d /sys/class/gpio ]; then
+    # env.LD_PRELOAD is owned by the binary (`config add-preload`): it keeps
+    # every other env key and preload entry, and is idempotent.
     if [ "$DRY_RUN" = 1 ]; then
       echo "  [dry-run] add $OPT_DIR/lib/libvmx_gpio_isr_shim.so to $CONF_DIR/config.json env.LD_PRELOAD"
-    else
-      if [ -f "$CONF_DIR/config.json" ]; then
-        local library="$OPT_DIR/lib/libvmx_gpio_isr_shim.so"
-        if ! grep -q "$library" "$CONF_DIR/config.json" 2>/dev/null; then
-          local tmp; tmp="$(mktemp "${CONF_DIR}/config.json.XXXXXX")"
-          if grep -q '"env":' "$CONF_DIR/config.json"; then
-            sed "s|\"env\":[[:space:]]*{[[:space:]]*}|\"env\": { \"LD_PRELOAD\": \"$library\" }|" "$CONF_DIR/config.json" > "$tmp"
-          else
-            sed '0,/{/s/{/{\n  "env": { "LD_PRELOAD": "'"$library"'" },/' "$CONF_DIR/config.json" > "$tmp"
-          fi
-          chmod --reference="$CONF_DIR/config.json" "$tmp" 2>/dev/null || chmod 0640 "$tmp"
-          chown --reference="$CONF_DIR/config.json" "$tmp" 2>/dev/null || true
-          mv -f "$tmp" "$CONF_DIR/config.json"
-        fi
-        echo "  configured GPIO shim in $CONF_DIR/config.json env.LD_PRELOAD"
-      fi
+    elif [ -f "$CONF_DIR/config.json" ]; then
+      run "$OPT_DIR/robot_manager" config add-preload "$CONF_DIR/config.json" "$OPT_DIR/lib/libvmx_gpio_isr_shim.so"
     fi
   fi
 }
@@ -1121,8 +1105,13 @@ summary() {
   network:   setupHotspot WorldSkills 1234 2.4 password; toggleNetMode ap; saved Wi-Fi profiles are deleted
   terminal:  http://10.TE.AM.2:7681 (ttyd web terminal)
   SystemCore: mrccomm.service (DS port 1110), hwmon.service, irqconf.service
+  sudoers:   $( [ "$WITH_SUDOERS" = 1 ] && echo "installed: deploy may restart the service" || echo "NOT installed: re-run with --sudoers or 'gradlew deploy' cannot restart the service" )
+  verify:    /opt/robot_manager/robot_manager storage verify   (after the reboot; --strict to require the runtime values)
 WPILib/OpenCV shared libraries are deployed per project by GradleRIO; this installer checks them but does not select a global OpenCV version.
 EOF
+  if [ "$WITH_SUDOERS" != 1 ] && [ "$DRY_RUN" != 1 ]; then
+    warn "without --sudoers, 'gradlew deploy' cannot run 'sudo systemctl stop/start robot_manager' over SSH"
+  fi
 }
 
 [ -n "$LOGIN_USER" ] || LOGIN_USER="${ADMIN_USER:-${SUDO_USER:-$(id -un)}}"

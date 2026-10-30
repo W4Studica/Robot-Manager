@@ -24,6 +24,9 @@ fn run() -> io::Result<()> {
         return Ok(());
     }
     let string_args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(result) = robot_manager::config_tool::dispatch(&string_args) {
+        return result;
+    }
     if let Some(result) = robot_manager::storage::dispatch(&string_args) {
         return result;
     }
@@ -133,6 +136,20 @@ fn run() -> io::Result<()> {
     } else {
         None
     };
+    let console: Option<Arc<dyn robot_manager::output::LineSink>> = server
+        .as_ref()
+        .map(|s| Arc::new(s.publisher()) as Arc<dyn robot_manager::output::LineSink>);
+    // hwmon/mrccomm alert lines arrive here and are republished into RioLog.
+    let mut alerts = match robot_manager::alerts::AlertListener::start(config.alert_port, console.clone()) {
+        Ok(listener) => Some(listener),
+        Err(error) => {
+            robot_manager::log(
+                "ERROR",
+                format_args!("alert listener could not bind: {error}"),
+            );
+            None
+        }
+    };
     let manager = Manager {
         command_file: config.command_file(),
         cwd: config.robot_home.clone(),
@@ -147,9 +164,7 @@ fn run() -> io::Result<()> {
         stopping,
         starts: Arc::new(AtomicUsize::new(0)),
         journal: Journal::stdout()?,
-        console: server
-            .as_ref()
-            .map(|s| Arc::new(s.publisher()) as Arc<dyn robot_manager::output::LineSink>),
+        console: console.clone(),
     };
     robot_manager::log(
         "INFO",
@@ -159,6 +174,9 @@ fn run() -> io::Result<()> {
         ),
     );
     let result = manager.run();
+    if let Some(listener) = alerts.as_mut() {
+        listener.stop();
+    }
     if let Some(server) = server.as_mut() {
         server.stop();
     }

@@ -208,24 +208,33 @@ pub fn run_daemon(interval: Duration, alert_temp_c: f32) -> io::Result<()> {
         ),
     );
     let mut last_throttled = 0;
+    let mut over_temp = false;
     loop {
         if let Ok(stats) = HardwareStats::collect() {
+            // Alerts fire on transitions only, so a persistent condition does
+            // not flood the journal and RioLog every interval.
             if stats.throttled_raw != last_throttled && stats.throttled_raw != 0 {
-                crate::log(
-                    "WARNING",
-                    format_args!(
-                        "Hardware status alert: {} ({})",
-                        stats.throttled_hex, stats.throttled_description
-                    ),
+                let line = format!(
+                    "hwmon: hardware status {} ({})",
+                    stats.throttled_hex, stats.throttled_description
                 );
+                crate::log("WARNING", &line);
+                crate::alerts::send(crate::alerts::DEFAULT_ALERT_PORT, &line);
                 last_throttled = stats.throttled_raw;
             }
             if let Some(temp) = stats.cpu_temp_c {
-                if temp >= alert_temp_c {
-                    crate::log(
-                        "WARNING",
-                        format_args!("High CPU temperature alert: {temp:.1}°C (limit {alert_temp_c:.1}°C)"),
-                    );
+                let hot = temp >= alert_temp_c;
+                if hot != over_temp {
+                    over_temp = hot;
+                    let line = if hot {
+                        format!(
+                            "hwmon: CPU temperature {temp:.1}°C reached the {alert_temp_c:.0}°C limit (throttling starts near 80°C)"
+                        )
+                    } else {
+                        format!("hwmon: CPU temperature recovered to {temp:.1}°C")
+                    };
+                    crate::log("WARNING", &line);
+                    crate::alerts::send(crate::alerts::DEFAULT_ALERT_PORT, &line);
                 }
             }
         }

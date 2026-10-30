@@ -1,6 +1,8 @@
 #![cfg(target_os = "linux")]
 
+pub mod alerts;
 pub mod config;
+pub mod config_tool;
 pub mod hwmon;
 pub mod inventory;
 pub mod irqconf;

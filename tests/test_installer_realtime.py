@@ -91,47 +91,49 @@ echo "STATUS=$RT_KERNEL_STATUS"
         self.assertIn("linux-raspi-realtime", result.stderr)
         self.assertNotIn("RUN", result.stdout)
 
+    # The edit itself belongs to the binary (`robot_manager config ...`; its
+    # behaviour is covered by the Rust tests). The installer only has to
+    # preview a dry run and to hand the edit to the binary.
     def migrate(self, config, *, dry_run=False):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
             before = json.dumps(config) + "\n"
             path.write_text(before)
             path.chmod(0o640)
+            calls = Path(directory) / "calls.txt"
             result = self.run_function(f'''
 CONF_DIR={shlex.quote(directory)}
+OPT_DIR={shlex.quote(directory + "/opt")}
 DRY_RUN={int(dry_run)}
+run() {{ printf '%s\\n' "$*" >> {shlex.quote(str(calls))}; }}
 configure_realtime
 ''', directory)
-            return result, before, path.read_text(), path.stat().st_mode & 0o777
+            invoked = calls.read_text() if calls.exists() else ""
+            return result, before, path.read_text(), invoked
 
-    def test_legacy_config_gains_rt_and_preserves_deploy_settings(self):
-        config = {"robot_home": "/home/robot", "env": {"LD_PRELOAD": "/custom.so"},
-                  "profiles": [{"name": "custom"}]}
-        result, _, after, mode = self.migrate(config)
+    def test_a_real_run_delegates_the_edit_to_the_binary(self):
+        result, before, after, invoked = self.migrate({"robot_home": "/home/robot"})
         self.assertEqual(result.returncode, 0, result.stderr)
-        updated = json.loads(after)
-        self.assertEqual(updated.pop("realtime"), {"mode": "auto", "policy": "rr", "priority": 10})
-        self.assertEqual(updated, config)
-        self.assertEqual(mode, 0o640)
+        self.assertIn("config ensure-realtime", invoked)
+        self.assertIn("config.json", invoked)
+        self.assertEqual(after, before, "the installer itself must not edit the file")
 
-    def test_existing_rt_policy_is_preserved_byte_for_byte(self):
-        for policy in ({"mode": "off"}, {"mode": "on", "policy": "fifo", "priority": 25}):
-            with self.subTest(policy=policy):
-                result, before, after, _ = self.migrate({"realtime": policy})
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(after, before)
-
-    def test_dry_run_keeps_existing_config_unchanged(self):
-        result, before, after, _ = self.migrate({"robot_home": "/home/robot"}, dry_run=True)
+    def test_dry_run_previews_and_never_invokes_the_binary(self):
+        result, before, after, invoked = self.migrate({"robot_home": "/home/robot"}, dry_run=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("[dry-run] add realtime", result.stdout)
+        self.assertEqual(invoked, "")
         self.assertEqual(after, before)
 
-    def test_non_object_config_fails_without_rewriting(self):
-        result, before, after, _ = self.migrate([])
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("must be a JSON object", result.stderr)
-        self.assertEqual(after, before)
+    def test_dry_run_with_an_existing_policy_says_so_without_touching_it(self):
+        for policy in ({"mode": "off"}, {"mode": "on", "policy": "fifo", "priority": 25}):
+            with self.subTest(policy=policy):
+                result, before, after, invoked = self.migrate({"realtime": policy}, dry_run=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("keeping existing RT policy", result.stdout)
+                self.assertNotIn("[dry-run] add realtime", result.stdout)
+                self.assertEqual(invoked, "")
+                self.assertEqual(after, before)
 
     def test_service_keeps_supervisor_normal_and_allows_child_rt(self):
         unit = (ROOT / "robot_manager.service").read_text()

@@ -40,6 +40,10 @@ pub struct Config {
     pub riolog_port: u16,
     #[serde(default = "default_history")]
     pub riolog_history: usize,
+    /// Loopback port where daemons send alert lines that are republished into
+    /// RioLog (`robots_manager` listens here; see alerts.rs).
+    #[serde(default = "default_alert_port")]
+    pub alert_port: u16,
     #[serde(default = "default_lse")]
     pub lse_emulation: String,
     #[serde(default = "default_library")]
@@ -56,6 +60,9 @@ fn yes() -> bool {
 }
 fn default_port() -> u16 {
     1741
+}
+fn default_alert_port() -> u16 {
+    crate::alerts::DEFAULT_ALERT_PORT
 }
 fn default_history() -> usize {
     200

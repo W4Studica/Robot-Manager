@@ -199,6 +199,32 @@ pub fn prepare_swap(
     runner: &dyn Fn(&[&str]) -> io::Result<String>,
     size: u64,
 ) -> io::Result<()> {
+    let free = path.parent().and_then(free_bytes);
+    prepare_swap_with_free(path, runner, size, free)
+}
+
+/// Free bytes on the filesystem holding `directory`, if it can be measured.
+fn free_bytes(directory: &Path) -> Option<u64> {
+    let directory = std::ffi::CString::new(directory.to_str()?).ok()?;
+    let mut stat = std::mem::MaybeUninit::uninit();
+    // SAFETY: statvfs fills the provided struct or fails.
+    let code = unsafe { libc::statvfs(directory.as_ptr(), stat.as_mut_ptr()) };
+    if code != 0 {
+        return None;
+    }
+    // SAFETY: statvfs succeeded, so the struct is initialized.
+    let stat = unsafe { stat.assume_init() };
+    Some(stat.f_bavail as u64 * stat.f_frsize as u64)
+}
+
+/// `free` is the space available for the new swap file; `None` skips the check
+/// (an unreadable parent directory must not block a deployment).
+pub fn prepare_swap_with_free(
+    path: &Path,
+    runner: &dyn Fn(&[&str]) -> io::Result<String>,
+    size: u64,
+    free: Option<u64>,
+) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         ensure_directory(parent)?;
     }
@@ -240,23 +266,18 @@ pub fn prepare_swap(
     }
     let _ = fs::remove_file(&temporary);
 
-    // Free disk space check using statvfs
-    if let Some(parent) = path.parent() {
-        let parent_str = std::ffi::CString::new(parent.to_str().unwrap())?;
-        let mut stat = std::mem::MaybeUninit::uninit();
-        let ret = unsafe { libc::statvfs(parent_str.as_ptr(), stat.as_mut_ptr()) };
-        if ret == 0 {
-            let stat = unsafe { stat.assume_init() };
-            let free_bytes = stat.f_bavail as u64 * stat.f_frsize as u64;
-            if free_bytes < size + 256 * 1024 * 1024 {
-                return Err(io::Error::other(
-                    "Not enough free disk space for 4 GiB swap plus 256 MiB reserve",
-                ));
-            }
+    if let Some(free) = free {
+        if free < size + 256 * 1024 * 1024 {
+            return Err(io::Error::other(format!(
+                "Not enough free disk space for the {} GiB swap plus 256 MiB reserve",
+                size / (1024 * 1024 * 1024)
+            )));
         }
     }
 
-    {
+    // A failure after this point must never leave the staging file behind: it
+    // would take `size` bytes of the SD card until the next install.
+    let staged = (|| -> io::Result<()> {
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -272,13 +293,18 @@ pub fn prepare_swap(
         }
         file.flush()?;
         file.sync_all()?;
-    }
+        drop(file);
 
-    runner(&["mkswap", temporary.to_str().unwrap()])?;
-    if let Ok(file) = File::open(&temporary) {
-        let _ = file.sync_all();
+        runner(&["mkswap", temporary.to_str().unwrap()])?;
+        if let Ok(file) = File::open(&temporary) {
+            let _ = file.sync_all();
+        }
+        fs::rename(&temporary, path)
+    })();
+    if staged.is_err() {
+        let _ = fs::remove_file(&temporary);
     }
-    fs::rename(&temporary, path)?;
+    staged?;
     if let Some(parent) = path.parent() {
         let _ = sync_directory(parent);
     }
@@ -479,6 +505,16 @@ pub fn configure(
     root: &Path,
     runner: &dyn Fn(&[&str]) -> io::Result<String>,
 ) -> io::Result<()> {
+    configure_with_swap_size(root, runner, SWAP_SIZE)
+}
+
+/// Same as [`configure`] with an explicit swap file size (tests use a small
+/// file instead of the deployed 4 GiB).
+pub fn configure_with_swap_size(
+    root: &Path,
+    runner: &dyn Fn(&[&str]) -> io::Result<String>,
+    swap_size: u64,
+) -> io::Result<()> {
     let target = |rel: &str| root.join(rel.trim_start_matches('/'));
 
     let release = fs::read_to_string(target("/etc/os-release"))?;
@@ -557,7 +593,7 @@ pub fn configure(
     if !backup.exists() {
         atomic_write(&backup, &before, 0o600)?;
     }
-    prepare_swap(&target(SWAP_PATH), runner, SWAP_SIZE)?;
+    prepare_swap(&target(SWAP_PATH), runner, swap_size)?;
 
     for (conf, dest) in [
         (ZRAM_CONF, "/etc/systemd/zram-generator.conf.d/99-w4studica.conf"),
@@ -590,6 +626,168 @@ pub fn configure(
     Ok(())
 }
 
+/// Look up a `key = value` line in an embedded policy file, so expected
+/// runtime values never exist as a second copy of the numbers.
+fn sysctl_value<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    text.lines().find_map(|line| {
+        let (name, value) = line.split_once('=')?;
+        (name.trim() == key).then(|| value.trim())
+    })
+}
+
+/// Priority of the managed swap entry in an fstab text, if present.
+fn swap_priority(fstab: &str) -> Option<String> {
+    let line = fstab.lines().find(|line| line.contains(SWAP_PATH))?;
+    let options = line.split_whitespace().nth(3)?;
+    options
+        .split(',')
+        .find_map(|option| option.strip_prefix("pri="))
+        .map(|value| value.to_string())
+}
+
+/// Compare what is deployed on the robot with the canonical policy that is
+/// compiled into this binary: profile files, the managed swap in /etc/fstab,
+/// and (informational unless `strict_runtime`) the values that only apply
+/// after a reboot.
+pub fn verify(
+    root: &Path,
+    runner: &dyn Fn(&[&str]) -> io::Result<String>,
+    strict_runtime: bool,
+) -> io::Result<bool> {
+    let target = |rel: &str| root.join(rel.trim_start_matches('/'));
+    let mut ok = true;
+    let mut runtime_ok = true;
+
+    for (relative, expected, name) in [
+        (
+            "/etc/systemd/zram-generator.conf.d/99-w4studica.conf",
+            ZRAM_CONF,
+            "zram profile",
+        ),
+        (
+            "/etc/systemd/journald.conf.d/99-w4studica.conf",
+            JOURNALD_CONF,
+            "journald profile",
+        ),
+        (
+            "/etc/sysctl.d/99-w4studica-memory.conf",
+            MEMORY_CONF,
+            "memory sysctl profile",
+        ),
+    ] {
+        match fs::read_to_string(target(relative)) {
+            Ok(text) if text == expected => println!("OK   {name}: {relative}"),
+            Ok(_) => {
+                ok = false;
+                println!("FAIL {name}: {relative} differs from the shipped policy (robot_manager storage configure, then reboot)");
+            }
+            Err(_) => {
+                ok = false;
+                println!("FAIL {name}: {relative} is missing (robot_manager storage configure)");
+            }
+        }
+    }
+
+    let wait = target("/etc/systemd/system/NetworkManager-wait-online.service.d/99-w4studica.conf");
+    match fs::read_to_string(&wait) {
+        Ok(text) if text == NETWORK_WAIT_CONF => println!("OK   network wait policy"),
+        Ok(_) => {
+            ok = false;
+            println!("FAIL network wait policy differs from the shipped policy");
+        }
+        Err(_) => println!("SKIP network wait policy: not installed (network mounts or administrator policy)"),
+    }
+    let local = target("/etc/systemd/system/NetworkManager-wait-online.service.d/99-w4studica-local-boot.conf");
+    if let Ok(text) = fs::read_to_string(&local) {
+        if text == LOCAL_BOOT_CONF {
+            println!("OK   local-boot policy");
+        } else {
+            ok = false;
+            println!("FAIL local-boot policy differs from the shipped policy");
+        }
+    }
+
+    match fs::read_to_string(target("/etc/fstab")) {
+        Ok(text) => match fstab_profile(&text) {
+            Ok((normalized, _)) if normalized == text => {
+                println!("OK   fstab: managed swap {SWAP_PATH} (4 GiB, pri=10)");
+            }
+            Ok(_) => {
+                ok = false;
+                println!("FAIL fstab: not normalized to the storage profile (robot_manager storage configure)");
+            }
+            Err(error) => {
+                ok = false;
+                println!("FAIL fstab: {error}");
+            }
+        },
+        Err(_) => {
+            ok = false;
+            println!("FAIL fstab: /etc/fstab is missing");
+        }
+    }
+
+    // Expected runtime values come from the embedded policy, never from a
+    // second copy of the numbers.
+    for (name, relative) in [
+        ("vm.swappiness", "proc/sys/vm/swappiness"),
+        ("vm.page-cluster", "proc/sys/vm/page-cluster"),
+        ("vm.vfs_cache_pressure", "proc/sys/vm/vfs_cache_pressure"),
+    ] {
+        let Some(expected) = sysctl_value(MEMORY_CONF, name) else {
+            continue;
+        };
+        match fs::read_to_string(target(relative)) {
+            Ok(text) => {
+                let value = text.trim();
+                if value == expected {
+                    println!("OK   {name} = {value}");
+                } else {
+                    runtime_ok = false;
+                    println!("PENDING {name} = {value} (policy {expected} applies at the next boot or with sysctl --system)");
+                }
+            }
+            Err(_) => println!("SKIP {name}: not readable"),
+        }
+    }
+    let zram_priority = sysctl_value(ZRAM_CONF, "swap-priority").unwrap_or("100");
+    let disk_priority = fs::read_to_string(target("/etc/fstab"))
+        .ok()
+        .and_then(|text| swap_priority(&text))
+        .unwrap_or_else(|| "10".to_string());
+    match runner(&["swapon", "--show=NAME,PRIO", "--noheadings"]) {
+        Ok(text) => {
+            let zram_active = text
+                .lines()
+                .any(|line| line.split_whitespace().last() == Some(zram_priority));
+            let file_active = text.lines().any(|line| {
+                line.contains(SWAP_PATH) && line.split_whitespace().last() == Some(&disk_priority)
+            });
+            if zram_active && file_active {
+                println!("OK   swap: zram (pri {zram_priority}) and {SWAP_PATH} (pri {disk_priority}) are active");
+            } else {
+                runtime_ok = false;
+                println!("PENDING swap: zram active = {zram_active}, disk swap active = {file_active} (applies at the next boot)");
+            }
+        }
+        Err(_) => println!("SKIP swap list: swapon is unavailable"),
+    }
+
+    let files_ok = ok;
+    if !runtime_ok && strict_runtime {
+        ok = false;
+    }
+    match (files_ok, runtime_ok) {
+        (true, true) => println!("storage verify: everything matches the shipped policy"),
+        (true, false) => {
+            println!("storage verify: profile and fstab match; runtime values are pending a reboot (use --strict to fail)")
+        }
+        (false, true) => println!("storage verify: differences found (see FAIL lines)"),
+        (false, false) => println!("storage verify: differences found and runtime values are pending"),
+    }
+    Ok(ok)
+}
+
 pub fn dispatch(args: &[String]) -> Option<io::Result<()>> {
     if args.is_empty() {
         return None;
@@ -599,6 +797,7 @@ pub fn dispatch(args: &[String]) -> Option<io::Result<()>> {
     }
     let mut root = PathBuf::from("/");
     let action = args.get(1).map(|s| s.as_str());
+    let mut strict = false;
     let mut iter = args.iter().skip(2);
     while let Some(arg) = iter.next() {
         if arg == "--root" {
@@ -607,6 +806,8 @@ pub fn dispatch(args: &[String]) -> Option<io::Result<()>> {
             }
         } else if let Some(r) = arg.strip_prefix("--root=") {
             root = PathBuf::from(r);
+        } else if arg == "--strict" {
+            strict = true;
         }
     }
 
@@ -618,8 +819,16 @@ pub fn dispatch(args: &[String]) -> Option<io::Result<()>> {
             configure_network_wait(&root, runner)
         })()),
         Some("network-wait") => Some(configure_network_wait(&root, runner)),
+        Some("verify") => Some((|| {
+            let ok = verify(&root, runner, strict)?;
+            if ok {
+                Ok(())
+            } else {
+                Err(io::Error::other("storage verify failed"))
+            }
+        })()),
         _ => Some(Err(io::Error::other(
-            "usage: robot_manager storage configure|finish-provisioning|network-wait [--root PATH]",
+            "usage: robot_manager storage configure|finish-provisioning|network-wait|verify [--root PATH] [--strict]",
         ))),
     }
 }

@@ -24,8 +24,8 @@ source tag identifies the OS image, SDK or compiled binary contents.
 On the **robot**, after deploying the project, record the actual combination:
 
 ```sh
-python3 system/runtime_inventory.py \
-  --runtime-dir /home/ubuntu/wpilib/third-party/lib \
+/opt/robot_manager/robot_manager inventory \
+  --runtime-dir /home/lvuser/wpilib/third-party/lib \
   --image-id '<fixed image version>' \
   --image-sha256 '<SHA-256 of the ISO/IMG recorded on the PC>' \
   --release '<deployed W4Studica release version>' \

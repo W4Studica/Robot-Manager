@@ -1,5 +1,5 @@
 use robot_manager::storage::{
-    finish_provisioning, fstab_profile, network_wait_reason, prepare_swap, JOURNALD_CONF,
+    finish_provisioning, fstab_profile, network_wait_reason, prepare_swap, verify, JOURNALD_CONF,
     MEMORY_CONF, NETWORK_WAIT_CONF, SWAP_PATH, SWAP_SIZE, ZRAM_CONF,
 };
 use std::fs;
@@ -201,4 +201,78 @@ fn network_wait_reason_identifies_local_only_robot() {
 
     let reason = network_wait_reason(root, &runner).unwrap();
     assert!(reason.is_none(), "expected local-only, got: {reason:?}");
+}
+
+/// Build a fake robot root with the deployed storage profile.
+fn deployed_root(fstab: &str) -> tempfile::TempDir {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let write = |relative: &str, text: &str| {
+        let path = root.join(relative.trim_start_matches('/'));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    };
+    write("/etc/systemd/zram-generator.conf.d/99-w4studica.conf", ZRAM_CONF);
+    write("/etc/systemd/journald.conf.d/99-w4studica.conf", JOURNALD_CONF);
+    write("/etc/sysctl.d/99-w4studica-memory.conf", MEMORY_CONF);
+    write("/etc/fstab", fstab);
+    write("/proc/sys/vm/swappiness", "180\n");
+    write("/proc/sys/vm/page-cluster", "0\n");
+    write("/proc/sys/vm/vfs_cache_pressure", "50\n");
+    temp
+}
+
+fn swapon_runner(args: &[&str]) -> io::Result<String> {
+    if args[0] == "swapon" {
+        Ok(format!("zram0 100\n{SWAP_PATH} 10\n"))
+    } else {
+        Ok(String::new())
+    }
+}
+
+fn normalized_fstab() -> String {
+    fstab_profile("UUID=root / ext4 defaults 0 1\n").unwrap().0
+}
+
+#[test]
+fn verify_accepts_a_correctly_deployed_robot() {
+    let temp = deployed_root(&normalized_fstab());
+    assert!(verify(temp.path(), &swapon_runner, true).unwrap());
+}
+
+#[test]
+fn verify_reports_a_missing_or_changed_profile() {
+    let temp = deployed_root(&normalized_fstab());
+    let zram = temp.path().join("etc/systemd/zram-generator.conf.d/99-w4studica.conf");
+    fs::write(&zram, "[zram0]\nzram-size = ram * 2\n").unwrap();
+    assert!(!verify(temp.path(), &swapon_runner, false).unwrap());
+
+    fs::remove_file(&zram).unwrap();
+    assert!(!verify(temp.path(), &swapon_runner, false).unwrap());
+}
+
+#[test]
+fn verify_reports_an_unnormalized_fstab() {
+    let temp = deployed_root("UUID=root / ext4 defaults 0 1\n");
+    assert!(!verify(temp.path(), &swapon_runner, false).unwrap());
+}
+
+#[test]
+fn runtime_values_are_pending_unless_strict() {
+    let temp = deployed_root(&normalized_fstab());
+    fs::write(temp.path().join("proc/sys/vm/swappiness"), "60\n").unwrap();
+    // The files are right, so a normal run only reports the pending reboot.
+    assert!(verify(temp.path(), &swapon_runner, false).unwrap());
+    assert!(!verify(temp.path(), &swapon_runner, true).unwrap());
+
+    // A missing zram swap is pending as well, not a file defect.
+    let no_zram = |args: &[&str]| -> io::Result<String> {
+        if args[0] == "swapon" {
+            Ok(format!("{SWAP_PATH} 10\n"))
+        } else {
+            Ok(String::new())
+        }
+    };
+    assert!(verify(temp.path(), &no_zram, false).unwrap());
+    assert!(!verify(temp.path(), &no_zram, true).unwrap());
 }

@@ -69,3 +69,52 @@ fn collect_identifies_missing_required_libraries() {
     let record = collect(&sdk, &runtime, "empty-image", None, "beta").unwrap();
     assert_eq!(record.missing_required.len(), 6);
 }
+
+/// Ported from the retired Python inventory tests: an incomplete deploy is
+/// explicit, and a changed binary changes the recorded identity.
+#[test]
+fn missing_files_are_explicit_and_changes_change_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let sdk = temp.path().join("sdk");
+    let runtime = temp.path().join("runtime");
+    fs::create_dir_all(&runtime).unwrap();
+    let library = runtime.join("libhalsim_studica.so");
+    fs::write(&library, b"first binary").unwrap();
+
+    let first = collect(&sdk, &runtime, "image", None, "release").unwrap();
+    assert!(first.image.sha256.is_none());
+    assert!(first
+        .missing_required
+        .iter()
+        .any(|item| item.contains("libwpiHal.so") && item.contains("libwpiHald.so")));
+    assert!(!first.missing_required.iter().any(|item| item.contains("libhalsim_studica.so")));
+
+    fs::write(&library, b"second binary").unwrap();
+    let second = collect(&sdk, &runtime, "image", None, "release").unwrap();
+    let before = &first.files[&library.to_string_lossy().to_string()].sha256;
+    let after = &second.files[&library.to_string_lossy().to_string()].sha256;
+    assert_ne!(before, after, "a changed binary must change the recorded hash");
+}
+
+#[test]
+fn either_build_type_without_separate_drivers_is_complete() {
+    let temp = tempfile::tempdir().unwrap();
+    let sdk = temp.path().join("sdk");
+    let runtime = temp.path().join("runtime");
+    fs::create_dir_all(sdk.join("usr/local/include/vmxpi")).unwrap();
+    fs::create_dir_all(sdk.join("usr/local/lib/vmxpi")).unwrap();
+    fs::create_dir_all(&runtime).unwrap();
+    fs::write(sdk.join("usr/local/include/vmxpi/VMXPi.h"), "//").unwrap();
+    fs::write(sdk.join("usr/local/lib/vmxpi/libvmxpi_hal_cpp.so"), "hal").unwrap();
+    for name in [
+        "libhalsim_studicad.so",
+        "libstudica_hardware.so",
+        "libstudica.so",
+        "libwpiHald.so",
+    ] {
+        fs::write(runtime.join(name), "x").unwrap();
+    }
+
+    let record = collect(&sdk, &runtime, "image", None, "release").unwrap();
+    assert!(record.missing_required.is_empty(), "{:?}", record.missing_required);
+}
