@@ -1,0 +1,14 @@
+[Unit]
+Description=W4Studica: Unblock Wi-Fi on boot for headless AP mode
+Before=NetworkManager.service
+DefaultDependencies=no
+After=systemd-rfkill.service
+
+[Service]
+Type=oneshot
+ExecStart=-/usr/sbin/rfkill unblock wifi
+ExecStart=-/usr/bin/nmcli radio wifi on
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,6 @@
+[W4Studica NetworkManager Headless AP]
+Identity=unix-user:*
+Action=org.freedesktop.NetworkManager.*
+ResultAny=yes
+ResultInactive=yes
+ResultActive=yes

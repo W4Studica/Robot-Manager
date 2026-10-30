@@ -62,6 +62,7 @@ RT_KERNEL_STATUS="not checked"
 UNDO_NETWORK=0
 CHECK_RUNTIME_DEPS=0
 CLEANUP_PACKAGES=0
+REBOOT_ON_FINISH=1
 AP_SSID=WorldSkills
 AP_TEAM=1234
 AP_BAND=2.4
@@ -106,6 +107,7 @@ Options:
   --undo-network           restore the saved pre-install network configuration and exit
   --check-runtime-deps     inspect the deployed robotCommand and GradleRIO .so files with ldd, then exit
   --cleanup-packages       purge optional Ubuntu image tooling and exit (--dry-run previews the removal plan)
+  --no-reboot              do not reboot after successful installation (reboot is default)
   --dry-run                print what would be done, change nothing
   -h, --help               this text
 EOF
@@ -141,6 +143,7 @@ while [ $# -gt 0 ]; do
     --undo-network) UNDO_NETWORK=1 ;;
     --check-runtime-deps) CHECK_RUNTIME_DEPS=1 ;;
     --cleanup-packages) CLEANUP_PACKAGES=1 ;;
+    --no-reboot) REBOOT_ON_FINISH=0 ;;
     --dry-run) DRY_RUN=1 ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; die "unknown argument: $1" ;;
@@ -665,6 +668,7 @@ install_robot_manager() {
   run install -m 0755 "$binary" "$OPT_DIR/robot_manager.new"
   run mv -f "$OPT_DIR/robot_manager.new" "$OPT_DIR/robot_manager"
   run install -m 0644 "$RM_DIR/robot_manager.service" "/etc/systemd/system/$SERVICE.service"
+  run ln -sfn "$SERVICE.service" "/etc/systemd/system/robot.service"
 
   if [ -f "$CONF_DIR/config.json" ]; then
     configure_realtime
@@ -931,9 +935,17 @@ YAML
 # Installed by W4Studica install.sh: the network is configured through NetworkManager, not cloud-init.
 network: {config: disabled}
 CFG
+  run install -d -m 0755 /etc/polkit-1/rules.d /etc/polkit-1/localauthority/50-local.d
+  run install -m 0644 "$RM_DIR/system/10-w4studica-network.rules" /etc/polkit-1/rules.d/10-w4studica-network.rules
+  run install -m 0644 "$RM_DIR/system/10-w4studica-network.pkla" /etc/polkit-1/localauthority/50-local.d/10-w4studica-network.pkla
+  run install -m 0644 "$RM_DIR/system/w4studica-rfkill-unblock.service" /etc/systemd/system/w4studica-rfkill-unblock.service
+  run systemctl enable w4studica-rfkill-unblock.service 2>/dev/null || true
+  command -v rfkill >/dev/null 2>&1 && run rfkill unblock wifi 2>/dev/null || true
+  command -v iw >/dev/null 2>&1 && run iw reg set US 2>/dev/null || true
+  command -v nmcli >/dev/null 2>&1 && run nmcli radio wifi on 2>/dev/null || true
+
   run install -m 0755 "$RM_DIR/system/undo_network.sh" "$OPT_DIR/bin/undo_network.sh"
   run install -m 0755 "$RM_DIR/system/apply_network.sh" "$OPT_DIR/bin/apply_network.sh"
-
   local team_number=$((10#$AP_TEAM)) address
   address="10.$((team_number / 100)).$((team_number % 100)).2"
   cat <<MSG
@@ -1006,7 +1018,7 @@ install_sudoers() {
   local tmp; tmp="$(mktemp)"
   cat > "$tmp" <<EOF
 # Installed by W4Studica install.sh: what 'gradlew deploy' runs through sudo for the VmxPi target.
-$LOGIN_USER ALL=(root) NOPASSWD: $systemctl_bin stop $SERVICE, $systemctl_bin start $SERVICE, $systemctl_bin enable $SERVICE, $ldconfig_bin, $sync_bin
+$LOGIN_USER ALL=(root) NOPASSWD: $systemctl_bin stop $SERVICE, $systemctl_bin start $SERVICE, $systemctl_bin restart $SERVICE, $systemctl_bin enable $SERVICE, $systemctl_bin stop robot, $systemctl_bin start robot, $systemctl_bin restart robot, $systemctl_bin enable robot, $ldconfig_bin, $sync_bin
 EOF
   if [ "$DRY_RUN" = 1 ]; then
     echo "[dry-run] write /etc/sudoers.d/w4studica-deploy (mode 0440):"; sed 's/^/[dry-run]   /' "$tmp"; rm -f "$tmp"; return
@@ -1025,7 +1037,7 @@ summary() {
   cat <<EOF
 
 ==> Done$( [ "$DRY_RUN" = 1 ] && echo " (dry run: nothing was changed)" )
-  service:   systemctl status $SERVICE      logs: journalctl -u $SERVICE -f
+  service:   systemctl status robot (or $SERVICE)      logs: journalctl -u robot -f
   config:    $CONF_DIR/config.json   (robot_home = $ROBOT_HOME)
   RT kernel: $RT_KERNEL_STATUS
   RT policy: $CONF_DIR/config.json realtime (new/legacy default: auto, SCHED_RR, priority 10; existing policies preserved)
@@ -1119,3 +1131,9 @@ install_sudoers
 restart_service
 run sync
 summary
+if [ "$DRY_RUN" = 1 ]; then
+  echo "[dry-run] reboot"
+elif [ "$REBOOT_ON_FINISH" = 1 ]; then
+  info "Installation complete. Rebooting the robot..."
+  run systemctl reboot 2>/dev/null || run reboot 2>/dev/null || true
+fi

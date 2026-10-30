@@ -45,7 +45,49 @@ install_robot_manager
     def test_service_executes_rust_binary_directly(self):
         unit = (ROOT / "robot_manager.service").read_text()
         self.assertIn("ExecStart=/opt/robot_manager/robot_manager --config", unit)
+        self.assertIn("Alias=robot.service", unit)
         self.assertNotIn("python", unit)
 
+    def test_service_installs_robot_service_symlink(self):
+        text = self.preview()
+        self.assertIn("ln -sfn robot_manager.service /etc/systemd/system/robot.service", text)
+
+    def test_sudoers_permits_robot_and_robot_manager_commands(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            harness = f'''
+DRY_RUN=1
+WITH_SUDOERS=1
+LOGIN_USER='ubuntu'
+SERVICE='robot_manager'
+install_sudoers
+'''
+            script = root / "sudoers-test.sh"
+            script.write_text(DEFINITIONS + harness)
+            result = subprocess.run(["bash", str(script)], env=os.environ, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("systemctl stop robot", result.stdout)
+            self.assertIn("systemctl start robot", result.stdout)
+            self.assertIn("systemctl restart robot", result.stdout)
+            self.assertIn("systemctl enable robot", result.stdout)
+            self.assertIn("systemctl stop robot_manager", result.stdout)
+            self.assertIn("systemctl start robot_manager", result.stdout)
+
+    def test_reboot_preview_and_no_reboot_option(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script = root / "reboot-test.sh"
+            script.write_text(DEFINITIONS + '''
+DRY_RUN=1
+summary() { echo DONE; }
+if [ "$DRY_RUN" = 1 ]; then
+  echo "[dry-run] reboot"
+elif [ "$REBOOT_ON_FINISH" = 1 ]; then
+  echo REBOOT
+fi
+''')
+            result = subprocess.run(["bash", str(script)], env=os.environ, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("[dry-run] reboot", result.stdout)
 if __name__ == "__main__":
     unittest.main()

@@ -23,6 +23,21 @@ fn run() -> io::Result<()> {
         io::stdout().write_all(result?.as_bytes())?;
         return Ok(());
     }
+    let string_args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(result) = robot_manager::storage::dispatch(&string_args) {
+        return result;
+    }
+    if let Some(result) = robot_manager::inventory::dispatch(&string_args) {
+        match result {
+            Ok(code) => {
+                if code != 0 {
+                    std::process::exit(code);
+                }
+                return Ok(());
+            }
+            Err(err) => return Err(err),
+        }
+    }
     let mut path = PathBuf::from(config::DEFAULT_CONFIG);
     let mut check = false;
     let mut args = std::env::args_os().skip(1);

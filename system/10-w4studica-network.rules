@@ -1,0 +1,7 @@
+// Allow NetworkManager to manage network connections and share Wi-Fi in AP mode
+// without requiring an active physical console session (seat0 / HDMI login).
+polkit.addRule(function(action, subject) {
+    if (action.id.indexOf("org.freedesktop.NetworkManager.") === 0) {
+        return polkit.Result.YES;
+    }
+});

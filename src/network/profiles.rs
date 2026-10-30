@@ -107,6 +107,7 @@ fn connection(name: &str, kind: &str, interface: &str, uuid: &str, priority: boo
             ("type", kind),
             ("interface-name", interface),
             ("autoconnect", "true"),
+            ("autoconnect-retries", "0"),
         ],
     );
     if priority {

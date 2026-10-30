@@ -29,6 +29,9 @@ until systemctl is-active --quiet NetworkManager.service; do
     [ "$i" -lt 30 ] || { echo "NetworkManager did not start" >&2; exit 1; }
     sleep 1
 done
+rfkill unblock wifi 2>/dev/null || true
+command -v iw >/dev/null 2>&1 && iw reg set US 2>/dev/null || true
+nmcli radio wifi on 2>/dev/null || true
 
 # SSH_CONNECTION is intentionally cleared so these commands execute synchronously here,
 # in the robot's service, instead of scheduling another operation tied to an SSH shell.
