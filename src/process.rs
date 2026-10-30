@@ -119,6 +119,16 @@ impl ChildGroup {
                 if libc::setsid() < 0 {
                     return Err(io::Error::last_os_error());
                 }
+                // Reset CPU affinity so the robot program can freely use all cores,
+                // unbinding from RobotManager's supervisor-only Core 4 pin.
+                let mut all_cpus: libc::cpu_set_t = std::mem::zeroed();
+                let num_cpus = libc::sysconf(libc::_SC_NPROCESSORS_ONLN);
+                if num_cpus > 0 {
+                    for c in 0..num_cpus as usize {
+                        libc::CPU_SET(c, &mut all_cpus);
+                    }
+                    let _ = libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &all_cpus);
+                }
                 if let Some(cred) = creds {
                     if libc::setgid(cred.gid) < 0 {
                         return Err(io::Error::last_os_error());

@@ -234,3 +234,50 @@ fn truncated_scheduling_reports_are_errors() {
     assert!(Report::read(&mut &[][..]).is_err());
     assert!(Report::read(&mut &[0u8; 15][..]).is_err());
 }
+
+#[test]
+fn child_process_affinity_is_reset_to_all_cores() {
+    use robot_manager::output::Journal;
+    use robot_manager::realtime::pin_to_core;
+    use std::os::unix::fs::PermissionsExt;
+    let _ = pin_to_core(0);
+    let temp = tempfile::tempdir().unwrap();
+    let command = temp.path().join("probe.sh");
+    let out = temp.path().join("affinity.txt");
+    fs::write(
+        &command,
+        format!(
+            "#!/bin/sh\npython3 -c 'import os; print(len(os.sched_getaffinity(0)))' > {}\n",
+            out.display()
+        ),
+    )
+    .unwrap();
+    let mut perm = fs::metadata(&command).unwrap().permissions();
+    perm.set_mode(0o755);
+    fs::set_permissions(&command, perm).unwrap();
+
+    let env = std::collections::HashMap::new();
+    let mut group = ChildGroup::spawn(
+        &command,
+        temp.path(),
+        &env,
+        Journal::with_writer(Box::new(std::io::sink())).unwrap(),
+        None,
+        Settings {
+            mode: Mode::Off,
+            ..Settings::default()
+        },
+        None,
+    )
+    .unwrap();
+
+    let _ = group.stop(&[libc::SIGTERM], Duration::from_secs(2));
+    if out.exists() {
+        let count: usize = fs::read_to_string(&out).unwrap().trim().parse().unwrap_or(0);
+        let num_cpus = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) } as usize;
+        assert_eq!(
+            count, num_cpus,
+            "child should have affinity to all {num_cpus} CPUs, not just pinned core"
+        );
+    }
+}
